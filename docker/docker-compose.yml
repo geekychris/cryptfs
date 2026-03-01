@@ -1,0 +1,83 @@
+# CryptoFS Docker Test & Benchmark Infrastructure
+#
+# Usage:
+#   docker compose up test-basic     # Run basic file tests
+#   docker compose up test-bench     # Run fio benchmarks
+#   docker compose up baseline-bench # Run baseline (no encryption) benchmarks
+#
+# Prerequisites:
+#   - cryptofs.ko loaded on host
+#   - CryptoFS mounted at /tmp/cryptofs_mount
+#   - Key activated
+
+services:
+  # Basic file operation tests through encrypted mount
+  test-basic:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: basic
+    volumes:
+      - ${CRYPTOFS_MOUNT:-/tmp/cryptofs_mount}:/data
+    environment:
+      - TEST_MODE=basic
+
+  # FIO benchmarks on encrypted filesystem
+  test-bench:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: bench
+    volumes:
+      - ${CRYPTOFS_MOUNT:-/tmp/cryptofs_mount}:/data
+      - ./results/cryptofs:/results
+    environment:
+      - TEST_MODE=bench
+
+  # Baseline benchmarks (no encryption, native filesystem)
+  baseline-bench:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: bench
+    volumes:
+      - ${BASELINE_DIR:-/tmp/cryptofs_baseline}:/data
+      - ./results/baseline:/results
+    environment:
+      - TEST_MODE=bench
+
+  # Authorized container (has access through policy)
+  authorized:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: basic
+    user: "1000:1000"
+    volumes:
+      - ${CRYPTOFS_MOUNT:-/tmp/cryptofs_mount}:/data
+
+  # Unauthorized container (different UID, should see ciphertext)
+  unauthorized:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: basic
+    user: "65534:65534"
+    volumes:
+      - ${CRYPTOFS_MOUNT:-/tmp/cryptofs_mount}:/data:ro
+
+  # Userspace encryption path verification (no kernel module needed)
+  crypto-verify:
+    build:
+      context: ../tests/crypto_verify
+      dockerfile: Dockerfile
+
+  # Full encryption demo: writes to encrypted + plaintext dirs
+  # mounted to the host for inspection from macOS
+  cryptofs-demo:
+    build:
+      context: ../tests/cryptofs_demo
+      dockerfile: Dockerfile
+    volumes:
+      - ${DEMO_ENCRYPTED:-./demo_encrypted}:/data/encrypted
+      - ${DEMO_PLAINTEXT:-./demo_plaintext}:/data/plaintext

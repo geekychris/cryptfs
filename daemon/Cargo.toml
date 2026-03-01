@@ -1,0 +1,48 @@
+[package]
+name = "cryptofs-keyd"
+version = "0.1.0"
+edition = "2021"
+description = "CryptoFS key management daemon"
+license = "GPL-2.0"
+
+[[bin]]
+name = "cryptofs-keyd"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Crypto
+ring = "0.17"
+argon2 = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI arguments (for daemon startup options)
+clap = { version = "4", features = ["derive"] }
+
+# Unix/Linux specifics
+libc = "0.2"
+nix = { version = "0.29", features = ["socket", "user"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Misc
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

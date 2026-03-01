@@ -1,0 +1,29 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# CryptoFS Development VM
+# Uses QEMU with HVF acceleration for ARM64 Linux on Apple Silicon Mac
+#
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "perk/ubuntu-24.04-arm64"
+  config.vm.hostname = "cryptofs-dev"
+
+  # Synced folder: project source shared with VM
+  config.vm.synced_folder "..", "/home/vagrant/cryptofs", type: "rsync",
+    rsync__exclude: [".git/", "vagrant/.vagrant/"]
+
+  # Network: forward SSH and key daemon port
+  config.vm.network "forwarded_port", guest: 8200, host: 8202
+
+  config.vm.provider "qemu" do |qe|
+    qe.arch = "aarch64"
+    qe.machine = "virt,accel=hvf,highmem=on"
+    qe.cpu = "host"
+    qe.memory = "4096"
+    qe.smp = "4"
+    qe.net_device = "virtio-net-pci"
+  end
+
+  config.vm.provision "shell", path: "provision.sh"
+end

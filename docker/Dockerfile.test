@@ -1,0 +1,28 @@
+# CryptoFS Test Container
+# Provides tools for testing and benchmarking encrypted filesystem access
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fio \
+    coreutils \
+    util-linux \
+    procps \
+    strace \
+    iproute2 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user
+RUN useradd -m -u 1000 testuser
+
+# Create directory for test data
+RUN mkdir -p /data /results
+
+# Copy test scripts
+COPY test_entrypoint.sh /usr/local/bin/test_entrypoint.sh
+RUN chmod +x /usr/local/bin/test_entrypoint.sh
+
+WORKDIR /data
+
+ENTRYPOINT ["/usr/local/bin/test_entrypoint.sh"]
+CMD ["all"]

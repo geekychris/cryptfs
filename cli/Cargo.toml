@@ -1,0 +1,27 @@
+[package]
+name = "cryptofs-admin"
+version = "0.1.0"
+edition = "2021"
+description = "CryptoFS administration CLI"
+license = "GPL-2.0"
+
+[[bin]]
+name = "cryptofs-admin"
+path = "src/main.rs"
+
+[dependencies]
+# CLI framework
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async (for Unix socket comms)
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1"
+
+# Misc
+tabled = "0.16"
