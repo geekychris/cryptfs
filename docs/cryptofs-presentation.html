@@ -770,8 +770,158 @@ cryptofs-admin policy remove &lt;rule-id&gt;
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 14: PERFORMANCE  ════════════════════════ -->
+<!-- ════════════════════════  SLIDE 14: KEY HANDOFF  ════════════════════════ -->
 <div class="slide" data-slide="13">
+  <h2 class="anim">How Does the App Get the Key?</h2>
+  <p class="subtitle anim anim-d1">It doesn't. The kernel holds the key and decides per-syscall who sees plaintext.</p>
+  <div class="cols anim anim-d2">
+    <div>
+      <h3>The Mechanics</h3>
+      <div class="diagram" style="max-width:100%; gap:6px;">
+        <div class="diagram-row">
+          <div class="box" style="min-width:200px;">Admin runs<br><code style="color:#38bdf8;">cryptofs-admin key activate</code></div>
+        </div>
+        <div class="arrow">↓ <span style="font-size:0.7rem;">master key enters kernel keyring</span></div>
+        <div class="diagram-row">
+          <div class="box active-box" style="min-width:350px;">
+            <div class="box-label">KERNEL MODULE (cryptofs.ko)</div>
+            Holds master key + all per-file FEKs<br>
+            <span style="font-size:0.85rem; color:#94a3b8;">On every read()/write() syscall:</span><br>
+            <span style="font-size:0.85rem; color:#fbbf24;">→ Inspects the calling process</span><br>
+            <span style="font-size:0.85rem; color:#fbbf24;">→ Checks UID, binary path/hash, etc.</span><br>
+            <span style="font-size:0.85rem; color:#fbbf24;">→ Decides: decrypt or return ciphertext</span>
+          </div>
+        </div>
+        <div class="arrow">↓</div>
+        <div class="diagram-row" style="gap:24px;">
+          <div class="box" style="border-color:#4ade80; min-width:180px;">
+            <div class="box-label" style="color:#4ade80;">ALLOWED PROCESS</div>
+            Sees plaintext<br><span style="font-size:0.8rem; color:#64748b;">e.g. Solr (UID 8983)</span>
+          </div>
+          <div class="box" style="border-color:#f87171; min-width:180px;">
+            <div class="box-label" style="color:#f87171;">DENIED PROCESS</div>
+            Sees ciphertext<br><span style="font-size:0.8rem; color:#64748b;">e.g. root running cat</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>What the kernel checks</h3>
+      <div class="code-block" style="font-size:0.78rem;">
+<span class="dim">// Called on EVERY read/write — kernel/file.c:118</span>
+authorized = cryptofs_policy_check(sbi, inode);
+
+<span class="dim">// Inspects the calling process — policy.c:195</span>
+bool cryptofs_policy_check(...) {
+  const struct cred *cred = <span class="accent">current_cred()</span>;
+  <span class="dim">// → UID, GID of the calling process</span>
+
+  exe_file = <span class="accent">current->mm->exe_file</span>;
+  <span class="dim">// → binary path and SHA-256 hash</span>
+
+  <span class="accent">current->comm</span>;
+  <span class="dim">// → process name</span>
+
+  <span class="dim">// First matching rule wins.</span>
+  <span class="dim">// No match → DENY (return ciphertext)</span>
+}
+      </div>
+      <div class="card mt">
+        <p style="font-size:0.95rem;"><strong>Key point:</strong> The application has <em>zero awareness</em> of encryption. It never touches a key. The kernel intercepts its syscalls and transparently encrypts or decrypts based on policy.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 15: SOLR EXAMPLE  ════════════════════════ -->
+<div class="slide" data-slide="14">
+  <h2 class="anim">Real-World Example: Encrypting Solr Indexes</h2>
+  <div class="cols anim anim-d1" style="gap:36px;">
+    <div>
+      <h3>Admin Setup (one-time)</h3>
+      <div class="terminal" style="max-width:100%;">
+        <div class="terminal-bar">
+          <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+          <span class="terminal-title">admin@ubuntu — bash</span>
+        </div>
+        <div class="terminal-body" style="font-size:0.78rem;">
+          <span class="dim"># 1. Install &amp; load CryptoFS</span><br>
+          <span class="prompt">$ </span><span class="cmd">sudo modprobe cryptofs</span><br><br>
+
+          <span class="dim"># 2. Start key daemon &amp; create a key</span><br>
+          <span class="prompt">$ </span><span class="cmd">sudo systemctl start cryptofs-keyd</span><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key generate --label solr-prod</span><br>
+          <span class="output">Generated: <span class="highlight">f7e2a1b3</span></span><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key unlock f7e2a1b3</span><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key activate f7e2a1b3</span><br><br>
+
+          <span class="dim"># 3. Mount CryptoFS OVER Solr's data dir</span><br>
+          <span class="prompt">$ </span><span class="cmd">sudo mount -t cryptofs \</span><br>
+          <span class="cmd">    /var/solr/data \</span>  <span class="dim"># lower dir (encrypted on disk)</span><br>
+          <span class="cmd">    /var/solr/data</span>   <span class="dim"># same path! (stacked mount)</span><br><br>
+
+          <span class="dim"># 4. Set policy: ONLY the solr user gets plaintext</span><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin policy add \</span><br>
+          <span class="cmd">    --dir /var/solr/data \</span><br>
+          <span class="cmd">    --type uid --value 8983 \</span>  <span class="dim"># solr user</span><br>
+          <span class="cmd">    --perm allow</span><br><br>
+
+          <span class="dim"># 5. (Optional) Also allow by Java binary hash</span><br>
+          <span class="prompt">$ </span><span class="cmd">SHA=$(sha256sum /usr/lib/jvm/.../java | awk '{print $1}')</span><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin policy add \</span><br>
+          <span class="cmd">    --dir /var/solr/data \</span><br>
+          <span class="cmd">    --type binary-hash --value $SHA \</span><br>
+          <span class="cmd">    --perm allow</span><br><br>
+
+          <span class="dim"># 6. Start Solr — it has NO IDEA encryption exists</span><br>
+          <span class="prompt">$ </span><span class="cmd">sudo systemctl start solr</span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>What Happens at Runtime</h3>
+      <div class="terminal" style="max-width:100%; margin-bottom:16px;">
+        <div class="terminal-bar">
+          <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+          <span class="terminal-title">runtime behavior</span>
+        </div>
+        <div class="terminal-body" style="font-size:0.78rem;">
+          <span class="dim"># Solr writes an index segment (as user solr)</span><br>
+          <span class="output">[solr] write("/var/solr/data/core1/_0.cfs")</span><br>
+          <span class="output">  → kernel: policy_check(uid=<span class="highlight">8983</span>) → <span class="accent-green">ALLOW</span></span><br>
+          <span class="output">  → encrypt → write ciphertext to disk</span><br><br>
+
+          <span class="dim"># Solr reads the index back</span><br>
+          <span class="output">[solr] read("/var/solr/data/core1/_0.cfs")</span><br>
+          <span class="output">  → kernel: policy_check(uid=<span class="highlight">8983</span>) → <span class="accent-green">ALLOW</span></span><br>
+          <span class="output">  → read ciphertext → decrypt → return plaintext</span><br><br>
+
+          <span class="dim"># Admin tries to peek (as root, uid=0)</span><br>
+          <span class="prompt"># </span><span class="cmd">cat /var/solr/data/core1/_0.cfs</span><br>
+          <span class="output">  → kernel: policy_check(uid=<span class="err">0</span>) → <span class="err">DENY</span></span><br>
+          <span class="output">  → returns <span class="err">raw ciphertext</span> (binary gibberish)</span><br><br>
+
+          <span class="dim"># Attacker copies raw files off disk</span><br>
+          <span class="output">  → gets only encrypted extents + auth tags</span><br>
+          <span class="output">  → <span class="err">useless without master key</span></span>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="color:#e2e8f0; font-size:1rem;">Why this works</h3>
+        <ul style="font-size:0.88rem;">
+          <li>Solr uses <strong>unmodified</strong> standard file I/O</li>
+          <li>The stacked mount at <strong>the same path</strong> means zero config changes to Solr</li>
+          <li>Encryption key <strong>never leaves kernel memory</strong></li>
+          <li>Even <strong>root</strong> can be denied by policy</li>
+          <li>Binary-hash policy prevents swapping java for a rogue binary</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 16: PERFORMANCE  ════════════════════════ -->
+<div class="slide" data-slide="15">
   <h2 class="anim">Performance</h2>
   <div class="cols anim anim-d1">
     <div>
@@ -830,8 +980,8 @@ struct cryptofs_inode_info {
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 15: TESTING  ════════════════════════ -->
-<div class="slide" data-slide="14">
+<!-- ════════════════════════  SLIDE 17: TESTING  ════════════════════════ -->
+<div class="slide" data-slide="16">
   <h2 class="anim">Comprehensive Test Suite</h2>
   <div class="cols anim anim-d1">
     <div>
@@ -888,8 +1038,8 @@ make demo               <span class="dim"># write files to host</span>
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 16: ARCHITECTURE SUMMARY  ════════════════════════ -->
-<div class="slide" data-slide="15">
+<!-- ════════════════════════  SLIDE 18: ARCHITECTURE SUMMARY  ════════════════════════ -->
+<div class="slide" data-slide="17">
   <h2 class="anim">Architecture Summary</h2>
   <div class="diagram wide anim anim-d1" style="max-width:920px;">
     <div class="diagram-row" style="gap:24px;">
@@ -943,8 +1093,8 @@ make demo               <span class="dim"># write files to host</span>
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 17: SUMMARY  ════════════════════════ -->
-<div class="slide" data-slide="16">
+<!-- ════════════════════════  SLIDE 19: SUMMARY  ════════════════════════ -->
+<div class="slide" data-slide="18">
   <div class="center-text">
     <h1 class="anim" style="font-size:2.6rem;">CryptoFS</h1>
     <p class="subtitle anim anim-d1">Transparent, Per-File, Kernel-Level Encryption for Linux</p>
@@ -993,7 +1143,7 @@ make demo               <span class="dim"># write files to host</span>
 <!-- ── Navigation ── -->
 <div class="nav">
   <button id="prev" onclick="navigate(-1)">←</button>
-  <span class="page-num" id="page-num">1 / 17</span>
+  <span class="page-num" id="page-num">1 / 19</span>
   <button id="next" onclick="navigate(1)">→</button>
 </div>
 <div class="key-hint">
