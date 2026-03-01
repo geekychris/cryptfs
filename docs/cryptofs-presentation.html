@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CryptoFS — Transparent Filesystem Encryption</title>
+<style>
+  /* ── Reset & Base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0a0e17; color: #e2e8f0; }
+
+  /* ── Slide Container ── */
+  .deck { position: relative; width: 100%; height: 100%; }
+  .slide {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; justify-content: center; align-items: center;
+    padding: 60px 80px;
+    opacity: 0; transform: translateX(60px);
+    transition: opacity 0.45s ease, transform 0.45s ease;
+    pointer-events: none;
+  }
+  .slide.active {
+    opacity: 1; transform: translateX(0); pointer-events: auto;
+  }
+  .slide.exit {
+    opacity: 0; transform: translateX(-60px);
+  }
+
+  /* ── Typography ── */
+  h1 { font-size: 2.8rem; font-weight: 700; margin-bottom: 0.3em; line-height: 1.15; }
+  h2 { font-size: 2.0rem; font-weight: 700; margin-bottom: 0.5em; line-height: 1.2; }
+  h3 { font-size: 1.3rem; font-weight: 600; margin-bottom: 0.4em; color: #94a3b8; }
+  p, li { font-size: 1.15rem; line-height: 1.65; color: #cbd5e1; }
+  ul { list-style: none; padding: 0; }
+  ul li { padding: 0.3em 0 0.3em 1.6em; position: relative; }
+  ul li::before { content: '▸'; position: absolute; left: 0; color: #38bdf8; font-weight: 700; }
+  .subtitle { font-size: 1.35rem; color: #94a3b8; margin-bottom: 1.5em; }
+  .accent { color: #38bdf8; }
+  .accent-green { color: #4ade80; }
+  .accent-red { color: #f87171; }
+  .accent-amber { color: #fbbf24; }
+  .dim { color: #64748b; }
+  strong { color: #f1f5f9; }
+  em { font-style: normal; color: #38bdf8; }
+
+  /* ── Layout helpers ── */
+  .cols { display: flex; gap: 50px; width: 100%; align-items: flex-start; }
+  .cols > * { flex: 1; }
+  .center-text { text-align: center; }
+  .wide { width: 100%; }
+  .mt { margin-top: 1.2em; }
+  .mt2 { margin-top: 2em; }
+
+  /* ── Code / Terminal ── */
+  pre, code { font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace; }
+  .code-block {
+    background: #111827; border: 1px solid #1e293b; border-radius: 10px;
+    padding: 22px 28px; font-size: 0.92rem; line-height: 1.7;
+    overflow-x: auto; width: 100%; color: #e2e8f0;
+  }
+  .terminal {
+    background: #000; border: 1px solid #333; border-radius: 12px;
+    overflow: hidden; width: 100%; max-width: 900px;
+  }
+  .terminal-bar {
+    background: #1a1a2e; padding: 10px 16px; display: flex; gap: 8px; align-items: center;
+  }
+  .terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+  .terminal-dot.r { background: #f87171; }
+  .terminal-dot.y { background: #fbbf24; }
+  .terminal-dot.g { background: #4ade80; }
+  .terminal-title { color: #64748b; font-size: 0.8rem; margin-left: 12px; font-family: monospace; }
+  .terminal-body { padding: 20px 24px; font-size: 0.88rem; line-height: 1.7; }
+  .terminal-body .prompt { color: #4ade80; }
+  .terminal-body .cmd { color: #f1f5f9; }
+  .terminal-body .output { color: #94a3b8; }
+  .terminal-body .highlight { color: #38bdf8; }
+  .terminal-body .warn { color: #fbbf24; }
+  .terminal-body .err { color: #f87171; }
+
+  /* ── Diagram boxes ── */
+  .diagram {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    width: 100%; max-width: 860px;
+  }
+  .diagram-row {
+    display: flex; gap: 16px; justify-content: center; width: 100%; flex-wrap: wrap;
+  }
+  .box {
+    border: 2px solid #334155; border-radius: 10px; padding: 14px 22px;
+    text-align: center; font-size: 0.95rem; min-width: 150px;
+    background: #111827; transition: border-color 0.3s, background 0.3s;
+  }
+  .box.active-box { border-color: #38bdf8; background: #0c1a2e; }
+  .box-label { font-size: 0.75rem; color: #64748b; margin-bottom: 4px; }
+  .arrow { color: #475569; font-size: 1.5rem; line-height: 1; }
+
+  /* ── Hex dump ── */
+  .hex-grid {
+    display: grid; grid-template-columns: auto 1fr auto;
+    gap: 0; font-family: monospace; font-size: 0.82rem; line-height: 1.65;
+    background: #0f172a; border-radius: 8px; padding: 16px 20px; width: 100%;
+  }
+  .hex-addr { color: #64748b; padding-right: 16px; user-select: none; }
+  .hex-bytes { color: #38bdf8; letter-spacing: 0.5px; }
+  .hex-ascii { color: #4ade80; padding-left: 16px; }
+  .hex-plain .hex-bytes { color: #4ade80; }
+  .hex-plain .hex-ascii { color: #4ade80; }
+
+  /* ── Cards ── */
+  .card {
+    background: #111827; border: 1px solid #1e293b; border-radius: 12px;
+    padding: 28px 32px; width: 100%;
+  }
+  .card h3 { color: #e2e8f0; margin-bottom: 0.5em; }
+
+  .stat-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 20px; width: 100%;
+  }
+  .stat-card {
+    background: #111827; border: 1px solid #1e293b; border-radius: 10px;
+    padding: 24px; text-align: center;
+  }
+  .stat-value { font-size: 2rem; font-weight: 700; color: #38bdf8; }
+  .stat-label { font-size: 0.85rem; color: #94a3b8; margin-top: 6px; }
+
+  /* ── Table ── */
+  .info-table { width: 100%; border-collapse: collapse; }
+  .info-table th, .info-table td {
+    padding: 10px 16px; text-align: left; border-bottom: 1px solid #1e293b;
+    font-size: 0.95rem;
+  }
+  .info-table th { color: #94a3b8; font-weight: 600; }
+  .info-table td { color: #cbd5e1; }
+
+  /* ── Navigation ── */
+  .nav {
+    position: fixed; bottom: 28px; right: 36px; z-index: 100;
+    display: flex; gap: 12px; align-items: center;
+  }
+  .nav button {
+    background: #1e293b; border: 1px solid #334155; color: #e2e8f0;
+    width: 44px; height: 44px; border-radius: 8px; cursor: pointer;
+    font-size: 1.2rem; display: flex; align-items: center; justify-content: center;
+    transition: background 0.2s;
+  }
+  .nav button:hover { background: #334155; }
+  .nav button:disabled { opacity: 0.3; cursor: default; }
+  .nav .page-num { color: #64748b; font-size: 0.85rem; min-width: 50px; text-align: center; }
+
+  /* ── Progress bar ── */
+  .progress {
+    position: fixed; top: 0; left: 0; height: 3px; background: #38bdf8;
+    transition: width 0.4s ease; z-index: 200;
+  }
+
+  /* ── Key hint ── */
+  .key-hint {
+    position: fixed; bottom: 32px; left: 36px; color: #475569; font-size: 0.8rem;
+  }
+  kbd {
+    background: #1e293b; border: 1px solid #334155; border-radius: 4px;
+    padding: 2px 8px; font-family: inherit; font-size: 0.8rem; color: #94a3b8;
+  }
+
+  /* ── Animations ── */
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(24px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .slide.active .anim { animation: fadeInUp 0.5s ease both; }
+  .slide.active .anim-d1 { animation-delay: 0.15s; }
+  .slide.active .anim-d2 { animation-delay: 0.3s; }
+  .slide.active .anim-d3 { animation-delay: 0.45s; }
+  .slide.active .anim-d4 { animation-delay: 0.6s; }
+
+  @keyframes blink { 50% { opacity: 0; } }
+  .cursor { animation: blink 1s step-end infinite; color: #4ade80; }
+
+  /* ── Flow animation ── */
+  .flow-arrow {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 0; font-size: 0.95rem;
+  }
+  .flow-step {
+    background: #111827; border: 1px solid #1e293b; border-radius: 8px;
+    padding: 10px 18px; white-space: nowrap;
+  }
+  .flow-sep { color: #475569; font-size: 1.3rem; }
+
+  /* ── File format visual ── */
+  .file-format {
+    display: flex; flex-direction: column; gap: 0; width: 100%; max-width: 500px;
+  }
+  .ff-block {
+    border: 1px solid #334155; padding: 12px 18px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 0.9rem;
+  }
+  .ff-block:first-child { border-radius: 10px 10px 0 0; }
+  .ff-block:last-child { border-radius: 0 0 10px 10px; }
+  .ff-block.header { background: #1e1b4b; border-color: #4338ca; }
+  .ff-block.ct { background: #172554; border-color: #1d4ed8; }
+  .ff-block.tag { background: #14332a; border-color: #15803d; }
+  .ff-size { color: #64748b; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+
+<div class="progress" id="progress"></div>
+
+<div class="deck" id="deck">
+
+<!-- ════════════════════════  SLIDE 1: TITLE  ════════════════════════ -->
+<div class="slide active" data-slide="0">
+  <div class="center-text">
+    <h3 class="anim" style="color:#38bdf8; letter-spacing:3px;">INTRODUCING</h3>
+    <h1 class="anim anim-d1" style="font-size:3.6rem;">🔒 CryptoFS</h1>
+    <p class="subtitle anim anim-d2">Kernel-Level Transparent Encryption for Linux</p>
+    <div class="anim anim-d3" style="display:flex; gap:24px; justify-content:center; flex-wrap:wrap; margin-top:1em;">
+      <span class="dim" style="font-size:1rem;">AES-256-GCM</span>
+      <span class="dim">•</span>
+      <span class="dim" style="font-size:1rem;">Per-File Keys</span>
+      <span class="dim">•</span>
+      <span class="dim" style="font-size:1rem;">Zero App Changes</span>
+      <span class="dim">•</span>
+      <span class="dim" style="font-size:1rem;">Per-Process Policies</span>
+    </div>
+    <p class="anim anim-d4 dim mt2" style="font-size:0.9rem;">Inspired by Thales CipherTrust Transparent Encryption (CTE)</p>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 2: THE PROBLEM  ════════════════════════ -->
+<div class="slide" data-slide="1">
+  <h2 class="anim">The Problem</h2>
+  <div class="cols mt anim anim-d1">
+    <div>
+      <h3>Data at rest is vulnerable</h3>
+      <ul>
+        <li>Stolen disks expose all data</li>
+        <li>Decommissioned hardware leaks secrets</li>
+        <li>Cloud storage accessed by unauthorized parties</li>
+        <li>Compliance mandates (HIPAA, PCI-DSS, GDPR) require encryption</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Existing solutions fall short</h3>
+      <ul>
+        <li><strong>Full-disk encryption</strong> — all-or-nothing, no per-file control</li>
+        <li><strong>Application-level</strong> — requires code changes to every app</li>
+        <li><strong>eCryptfs</strong> — limited cipher support, no per-process policies</li>
+        <li><strong>fscrypt</strong> — filesystem-specific, not stackable</li>
+      </ul>
+    </div>
+  </div>
+  <div class="card mt2 anim anim-d2 center-text">
+    <p style="font-size:1.1rem;"><em>CryptoFS</em> provides <strong>transparent, per-file AES-256-GCM encryption</strong> at the VFS layer — no application changes, fine-grained access control, works on any filesystem.</p>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 3: HOW IT WORKS  ════════════════════════ -->
+<div class="slide" data-slide="2">
+  <h2 class="anim">How It Works — Stacked Filesystem</h2>
+  <p class="subtitle anim anim-d1">CryptoFS sits between applications and the underlying filesystem</p>
+  <div class="diagram anim anim-d2">
+    <div class="diagram-row">
+      <div class="box" style="min-width:280px;">
+        <div class="box-label">USERSPACE</div>
+        Applications (cat, vim, nginx, …)
+      </div>
+    </div>
+    <div class="arrow">↕ <span style="font-size:0.7rem; color:#64748b;">POSIX syscalls (open, read, write)</span></div>
+    <div class="diagram-row">
+      <div class="box active-box" style="min-width:500px;">
+        <div class="box-label">KERNEL — VFS LAYER</div>
+        <strong style="color:#38bdf8; font-size:1.1rem;">cryptofs.ko</strong><br>
+        <span style="font-size:0.85rem; color:#94a3b8;">Policy Engine → Crypto Engine (AES-256-GCM) → Audit</span>
+      </div>
+    </div>
+    <div class="arrow">↕ <span style="font-size:0.7rem; color:#64748b;">encrypted extents + auth tags</span></div>
+    <div class="diagram-row">
+      <div class="box">
+        <div class="box-label">LOWER FILESYSTEM</div>
+        ext4 / xfs / btrfs / …
+      </div>
+    </div>
+  </div>
+  <div class="cols mt anim anim-d3" style="max-width:800px;">
+    <div class="center-text">
+      <p class="accent-green" style="font-weight:600;">✓ Authorized process</p>
+      <p class="dim" style="font-size:0.9rem;">Sees plaintext transparently</p>
+    </div>
+    <div class="center-text">
+      <p class="accent-red" style="font-weight:600;">✗ Unauthorized process</p>
+      <p class="dim" style="font-size:0.9rem;">Reads → ciphertext, Writes → EACCES</p>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 4: DATA FLOW  ════════════════════════ -->
+<div class="slide" data-slide="3">
+  <h2 class="anim">Data Flow</h2>
+  <div class="wide anim anim-d1">
+    <div class="card" style="margin-bottom:20px;">
+      <h3 class="accent-green">Authorized Write</h3>
+      <div class="flow-arrow" style="flex-wrap:wrap;">
+        <div class="flow-step">write()</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step">VFS</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#38bdf8;">cryptofs</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#4ade80;">Policy ✓</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step">Split 4KB extents</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#a78bfa;">AES-256-GCM encrypt</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step">Lower FS</div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:20px;">
+      <h3 class="accent-green">Authorized Read</h3>
+      <div class="flow-arrow" style="flex-wrap:wrap;">
+        <div class="flow-step">read()</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step">VFS</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#38bdf8;">cryptofs</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#4ade80;">Policy ✓</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step">Read extents from lower FS</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#a78bfa;">GCM decrypt + verify tag</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step">Plaintext</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="accent-red">Unauthorized Access</h3>
+      <div class="flow-arrow" style="flex-wrap:wrap;">
+        <div class="flow-step">read()</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#f87171;">Policy ✗</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step">Raw ciphertext returned</div>
+        <div class="flow-sep" style="margin-left:24px;">|</div>
+        <div class="flow-step">write()</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#f87171;">Policy ✗</div>
+        <div class="flow-sep">→</div>
+        <div class="flow-step" style="border-color:#f87171;">-EACCES denied</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 5: ENCRYPTION DETAILS  ════════════════════════ -->
+<div class="slide" data-slide="4">
+  <h2 class="anim">Encryption Architecture</h2>
+  <div class="cols anim anim-d1">
+    <div>
+      <h3>Key Hierarchy</h3>
+      <div class="code-block" style="font-size:0.85rem;">
+Master Key <span class="dim">(256-bit, Argon2id-protected)</span>
+  └── wraps → <span class="accent">FEK</span> <span class="dim">(256-bit, unique per file)</span>
+                └── derives → <span class="accent-green">Nonce</span> <span class="dim">(96-bit, per extent)</span>
+      </div>
+      <ul class="mt">
+        <li><strong>Cipher:</strong> AES-256-GCM via kernel Crypto API</li>
+        <li><strong>Key size:</strong> 256 bits (32 bytes)</li>
+        <li><strong>Auth tag:</strong> 128 bits per 4KB extent</li>
+        <li><strong>Nonce:</strong> HMAC-SHA256(FEK, inode ‖ extent_idx)[0:12]</li>
+        <li><strong>FEK wrapping:</strong> AES-256-GCM with master key</li>
+      </ul>
+    </div>
+    <div>
+      <h3>On-Disk File Format</h3>
+      <div class="file-format">
+        <div class="ff-block header">
+          <span>File Header</span>
+          <span class="ff-size">128 bytes</span>
+        </div>
+        <div class="ff-block ct">
+          <span>Extent 0: Ciphertext</span>
+          <span class="ff-size">4096 bytes</span>
+        </div>
+        <div class="ff-block tag">
+          <span>Extent 0: GCM Auth Tag</span>
+          <span class="ff-size">16 bytes</span>
+        </div>
+        <div class="ff-block ct">
+          <span>Extent 1: Ciphertext</span>
+          <span class="ff-size">4096 bytes</span>
+        </div>
+        <div class="ff-block tag">
+          <span>Extent 1: GCM Auth Tag</span>
+          <span class="ff-size">16 bytes</span>
+        </div>
+        <div class="ff-block" style="background:#111827; color:#64748b; text-align:center; justify-content:center;">
+          … more extents …
+        </div>
+      </div>
+      <p class="dim mt" style="font-size:0.85rem;">Overhead: 128B + 16B per extent ≈ 0.4% for a 1MB file</p>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 6: DEMO — TERMINAL  ════════════════════════ -->
+<div class="slide" data-slide="5">
+  <h2 class="anim">Live Demo — Encryption in Action</h2>
+  <p class="subtitle anim anim-d1">Same data, two views: plaintext mount vs. raw on-disk</p>
+  <div class="cols anim anim-d2" style="gap:30px; align-items:stretch;">
+    <div class="terminal" style="flex:1;">
+      <div class="terminal-bar">
+        <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+        <span class="terminal-title">Authorized View (mount point)</span>
+      </div>
+      <div class="terminal-body">
+        <span class="prompt">$ </span><span class="cmd">cat /mnt/cryptofs/hello.txt</span><br>
+        <span class="output">Hello, CryptoFS! This text is encrypted at rest.</span><br><br>
+        <span class="prompt">$ </span><span class="cmd">cat /mnt/cryptofs/secret.json</span><br>
+        <span class="output">{"api_key": "sk-prod-29f8a1b3c4d5", "db_pass": "hunter2"}</span><br><br>
+        <span class="prompt">$ </span><span class="cmd">sha256sum /mnt/cryptofs/report.pdf</span><br>
+        <span class="output">a3f1b9c2... report.pdf</span><br><br>
+        <span class="dim"># Files appear completely normal</span><br>
+        <span class="dim"># No application changes needed</span>
+      </div>
+    </div>
+    <div class="terminal" style="flex:1;">
+      <div class="terminal-bar">
+        <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+        <span class="terminal-title">Raw On-Disk (lower directory)</span>
+      </div>
+      <div class="terminal-body">
+        <span class="prompt">$ </span><span class="cmd">hexdump -C /data/encrypted/hello.txt | head -8</span><br>
+        <span class="output">00000000</span> <span class="highlight">43 52 59 50 46 53 30 31</span> <span class="output">|CRYPFS01|</span><br>
+        <span class="output">00000008</span> <span class="highlight">01 00 00 00 00 00 00 00</span> <span class="output">|........|</span><br>
+        <span class="output">00000010</span> <span class="err">de d3 89 6d 6b ce 23 10</span> <span class="output">|...mk.#.|</span><br>
+        <span class="output">00000018</span> <span class="err">9f 2d 0a ff 7a db 06 42</span> <span class="output">|.-..z..B|</span><br>
+        <span class="output">00000020</span> <span class="err">4a aa 20 5d 29 36 70 2b</span> <span class="output">|J. )6p+.|</span><br>
+        <span class="output">00000028</span> <span class="err">2c 07 af 0c b8 57 e4 d0</span> <span class="output">|,....W..|</span><br><br>
+        <span class="dim"># Header + encrypted ciphertext</span><br>
+        <span class="dim"># Completely unreadable without key</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 7: DEMO — SIZE COMPARISON  ════════════════════════ -->
+<div class="slide" data-slide="6">
+  <h2 class="anim">Demo — File Size Comparison</h2>
+  <p class="subtitle anim anim-d1">Encrypted files include a 128-byte header + 16-byte auth tag per 4KB extent</p>
+  <div class="card wide anim anim-d2">
+    <table class="info-table">
+      <thead>
+        <tr><th>File</th><th>Plaintext Size</th><th>Encrypted Size</th><th>Overhead</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>hello.txt</td><td>49 B</td><td>193 B</td><td>+144 B (header + 1 tag)</td></tr>
+        <tr><td>exact_4k.bin</td><td>4,096 B</td><td>4,240 B</td><td>+144 B (header + 1 tag)</td></tr>
+        <tr><td>multi.bin</td><td>10,000 B</td><td>10,480 B</td><td>+480 B (header + 3 tags)</td></tr>
+        <tr><td>large.bin</td><td>256 KB</td><td>257 KB</td><td>~0.5%</td></tr>
+        <tr><td style="color:#94a3b8;">1 MB file</td><td style="color:#94a3b8;">1,048,576 B</td><td style="color:#94a3b8;">1,052,800 B</td><td style="color:#94a3b8;">~0.4%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="stat-grid mt2 anim anim-d3" style="max-width:600px;">
+    <div class="stat-card">
+      <div class="stat-value">128 B</div>
+      <div class="stat-label">Per-file header</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">16 B</div>
+      <div class="stat-label">Per-extent auth tag</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">~0.4%</div>
+      <div class="stat-label">Overhead @ 1 MB</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 8: DEMO — TAMPER DETECTION  ════════════════════════ -->
+<div class="slide" data-slide="7">
+  <h2 class="anim">Demo — Tamper Detection</h2>
+  <p class="subtitle anim anim-d1">GCM authentication tags detect any modification to ciphertext</p>
+  <div class="cols anim anim-d2" style="gap:30px;">
+    <div class="terminal" style="flex:1;">
+      <div class="terminal-bar">
+        <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+        <span class="terminal-title">Tamper Test</span>
+      </div>
+      <div class="terminal-body">
+        <span class="dim"># Flip one bit in the ciphertext</span><br>
+        <span class="prompt">$ </span><span class="cmd">python3 -c "flip_bit(encrypted, offset=200)"</span><br><br>
+        <span class="dim"># Attempt to read the tampered file</span><br>
+        <span class="prompt">$ </span><span class="cmd">cat /mnt/cryptofs/tamper.bin</span><br>
+        <span class="err">cat: /mnt/cryptofs/tamper.bin: I/O error</span><br><br>
+        <span class="dim"># Check kernel log</span><br>
+        <span class="prompt">$ </span><span class="cmd">dmesg | tail -1</span><br>
+        <span class="err">cryptofs: GCM auth tag mismatch on inode 1042 extent 0</span><br><br>
+        <span class="dim"># Also detects tag bit-flips</span><br>
+        <span class="prompt">$ </span><span class="cmd">python3 -c "flip_bit(encrypted, offset=4224)"</span><br>
+        <span class="err">GCM verification failed — tamper detected ✓</span>
+      </div>
+    </div>
+    <div style="flex:1;">
+      <h3>Why This Matters</h3>
+      <ul>
+        <li><strong>Silent corruption impossible</strong> — any bit flip is detected</li>
+        <li><strong>Ransomware detection</strong> — encrypted files with wrong tags fail to read</li>
+        <li><strong>128-bit auth tags</strong> — per every 4KB extent, not just per file</li>
+        <li><strong>Immediate feedback</strong> — I/O error at read time, logged to dmesg + audit</li>
+      </ul>
+      <div class="card mt2">
+        <p style="font-size:0.95rem;">Each 4KB extent is independently authenticated. An attacker cannot:</p>
+        <ul style="margin-top:0.5em;">
+          <li>Modify ciphertext without detection</li>
+          <li>Swap extents between files</li>
+          <li>Replay old versions of an extent</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 9: QUICK START  ════════════════════════ -->
+<div class="slide" data-slide="8">
+  <h2 class="anim">Getting Started — 5 Steps</h2>
+  <div class="terminal wide anim anim-d1" style="max-width:860px;">
+    <div class="terminal-bar">
+      <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+      <span class="terminal-title">ubuntu — bash</span>
+    </div>
+    <div class="terminal-body">
+      <span class="dim"># 1. Build everything</span><br>
+      <span class="prompt">$ </span><span class="cmd">make all</span><br><br>
+
+      <span class="dim"># 2. Load the kernel module</span><br>
+      <span class="prompt">$ </span><span class="cmd">sudo insmod kernel/cryptofs.ko</span><br>
+      <span class="output">[cryptofs] module loaded — AES-256-GCM, extent size 4096</span><br><br>
+
+      <span class="dim"># 3. Start daemon &amp; activate a key</span><br>
+      <span class="prompt">$ </span><span class="cmd">sudo cryptofs-keyd --foreground &amp;</span><br>
+      <span class="prompt">$ </span><span class="cmd">cryptofs-admin key generate --label my-key</span><br>
+      <span class="output">Generated key: <span class="highlight">a1b2c3d4-e5f6-7890-abcd-ef1234567890</span></span><br>
+      <span class="prompt">$ </span><span class="cmd">cryptofs-admin key unlock a1b2c3d4 &amp;&amp; cryptofs-admin key activate a1b2c3d4</span><br><br>
+
+      <span class="dim"># 4. Mount</span><br>
+      <span class="prompt">$ </span><span class="cmd">sudo mount -t cryptofs /data/encrypted /mnt/decrypted</span><br><br>
+
+      <span class="dim"># 5. Use it — completely transparent!</span><br>
+      <span class="prompt">$ </span><span class="cmd">echo "secret data" &gt; /mnt/decrypted/test.txt</span><br>
+      <span class="prompt">$ </span><span class="cmd">cat /mnt/decrypted/test.txt</span><br>
+      <span class="output">secret data</span>  <span class="dim"># ← plaintext</span><br>
+      <span class="prompt">$ </span><span class="cmd">xxd /data/encrypted/test.txt | head -2</span><br>
+      <span class="output">00000000: 4352 5950 4653 3031 ...</span>  <span class="dim"># ← ciphertext on disk</span>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 10: DOCKER USAGE  ════════════════════════ -->
+<div class="slide" data-slide="9">
+  <h2 class="anim">Docker Integration</h2>
+  <div class="cols anim anim-d1">
+    <div>
+      <h3>Host-Mount Approach (Production)</h3>
+      <div class="code-block">
+<span class="dim"># Mount CryptoFS on the host</span>
+sudo mount -t cryptofs /data/encrypted /mnt/decrypted
+
+<span class="dim"># Containers see decrypted data via bind mount</span>
+docker run -v /mnt/decrypted:/data myapp
+      </div>
+      <ul class="mt">
+        <li>Encryption is invisible to containers</li>
+        <li>No CryptoFS code runs inside the container</li>
+        <li>Works with any container runtime</li>
+        <li>Policy engine controls which containers get access</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Docker Compose Test Infrastructure</h3>
+      <div class="code-block">
+<span class="dim"># Run the encryption demo (writes to host)</span>
+make demo
+
+<span class="dim"># Run crypto verification (no kernel needed)</span>
+make test-crypto
+
+<span class="dim"># Interactive inspection</span>
+docker compose -f docker/docker-compose.yml \
+  run --rm --entrypoint /bin/sh cryptofs-demo
+
+<span class="dim"># Inside container:</span>
+cryptofs_demo         <span class="dim"># run 26 tests</span>
+ls /data/encrypted/   <span class="dim"># inspect files</span>
+ls /data/plaintext/   <span class="dim"># compare</span>
+      </div>
+      <p class="dim mt" style="font-size:0.9rem;">5 pre-built services: test-basic, test-bench, baseline-bench, authorized, unauthorized</p>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 11: NATIVE INSTALL  ════════════════════════ -->
+<div class="slide" data-slide="10">
+  <h2 class="anim">Installing on Ubuntu</h2>
+  <div class="cols anim anim-d1">
+    <div>
+      <h3>Prerequisites</h3>
+      <div class="code-block" style="font-size:0.82rem;">
+sudo apt-get install -y \
+  build-essential \
+  linux-headers-$(uname -r) \
+  libelf-dev libssl-dev \
+  pkg-config bc flex bison kmod
+      </div>
+      <h3 class="mt2">Build &amp; Install</h3>
+      <div class="code-block" style="font-size:0.82rem;">
+make all
+sudo make install
+      </div>
+      <h3 class="mt2">Verify</h3>
+      <div class="code-block" style="font-size:0.82rem;">
+sudo modprobe cryptofs
+lsmod | grep cryptofs
+cat /proc/filesystems | grep cryptofs
+      </div>
+    </div>
+    <div>
+      <h3>Four Install Options</h3>
+      <table class="info-table">
+        <tbody>
+          <tr>
+            <td><strong class="accent">insmod</strong></td>
+            <td>Load directly from build dir — dev/test use</td>
+          </tr>
+          <tr>
+            <td><strong class="accent">modprobe</strong></td>
+            <td>Install to /lib/modules + depmod — resolves deps</td>
+          </tr>
+          <tr>
+            <td><strong class="accent">Auto-load</strong></td>
+            <td>/etc/modules-load.d/cryptofs.conf — survives reboot</td>
+          </tr>
+          <tr>
+            <td><strong class="accent">DKMS</strong></td>
+            <td>Auto-rebuilds on kernel updates — production</td>
+          </tr>
+        </tbody>
+      </table>
+      <h3 class="mt2">DKMS (Recommended for Production)</h3>
+      <div class="code-block" style="font-size:0.82rem;">
+sudo apt-get install -y dkms
+sudo mkdir -p /usr/src/cryptofs-1.0
+sudo cp kernel/*.c kernel/*.h kernel/Makefile \
+  /usr/src/cryptofs-1.0/
+<span class="dim"># + create dkms.conf</span>
+sudo dkms add -m cryptofs -v 1.0
+sudo dkms build -m cryptofs -v 1.0
+sudo dkms install -m cryptofs -v 1.0
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 12: KEY MANAGEMENT  ════════════════════════ -->
+<div class="slide" data-slide="11">
+  <h2 class="anim">Key Management &amp; Administration</h2>
+  <div class="cols anim anim-d1">
+    <div>
+      <h3>Key Lifecycle</h3>
+      <div class="terminal" style="max-width:100%;">
+        <div class="terminal-bar">
+          <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+          <span class="terminal-title">cryptofs-admin</span>
+        </div>
+        <div class="terminal-body" style="font-size:0.82rem;">
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key generate --label prod-1</span><br>
+          <span class="output">Generated key: <span class="highlight">a1b2c3d4</span></span><br><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key list</span><br>
+          <span class="output">ID          Label    Status</span><br>
+          <span class="output">a1b2c3d4    prod-1   locked</span><br><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key unlock a1b2c3d4</span><br>
+          <span class="output">Key unlocked into daemon memory</span><br><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key activate a1b2c3d4</span><br>
+          <span class="output">Key injected into kernel keyring</span><br><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin key rotate a1b2c3d4</span><br>
+          <span class="output">Re-wrapping FEKs with new master key...</span><br><br>
+          <span class="prompt">$ </span><span class="cmd">cryptofs-admin status</span><br>
+          <span class="output">Module: loaded | Mount: /mnt/decrypted | Key: active</span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>Key Storage</h3>
+      <ul>
+        <li><strong>Master keys</strong> stored encrypted on disk with Argon2id KDF</li>
+        <li><strong>Unlocked</strong> into daemon memory on demand</li>
+        <li><strong>Activated</strong> = pushed to Linux kernel keyring</li>
+        <li><strong>FEKs</strong> stored in each file header, wrapped by master key</li>
+      </ul>
+      <h3 class="mt2">Daemon Configuration</h3>
+      <div class="code-block" style="font-size:0.82rem;">
+cryptofs-keyd \
+  --socket /var/run/cryptofs/keyd.sock \
+  --key-dir /var/lib/cryptofs/keys \
+  --audit-log /var/log/cryptofs/keyd.log \
+  --log-level info
+      </div>
+      <h3 class="mt2">Monitoring</h3>
+      <div class="code-block" style="font-size:0.82rem;">
+cryptofs-admin status
+cryptofs-admin audit --count 50
+cryptofs-admin --format json audit --count 100
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 13: ACCESS POLICIES  ════════════════════════ -->
+<div class="slide" data-slide="12">
+  <h2 class="anim">Access Policies</h2>
+  <p class="subtitle anim anim-d1">Fine-grained, per-process control — enforced in kernel space</p>
+  <div class="cols anim anim-d2">
+    <div>
+      <h3>Policy Types</h3>
+      <table class="info-table">
+        <thead><tr><th>Type</th><th>Matches On</th><th>Strength</th></tr></thead>
+        <tbody>
+          <tr><td><code>uid</code></td><td>User ID</td><td>Medium</td></tr>
+          <tr><td><code>gid</code></td><td>Group ID</td><td>Medium</td></tr>
+          <tr><td><code>binary-path</code></td><td>Executable path</td><td>Medium</td></tr>
+          <tr><td><code>binary-hash</code></td><td>SHA-256 of binary</td><td><span class="accent-green">Strong</span></td></tr>
+          <tr><td><code>process-name</code></td><td>Process comm</td><td><span class="accent-amber">Weak</span></td></tr>
+        </tbody>
+      </table>
+      <div class="card mt2" style="font-size:0.9rem;">
+        <p><strong>Default behavior:</strong></p>
+        <ul>
+          <li>No policies → all processes have access (PoC mode)</li>
+          <li>With policies → default <strong>DENY</strong></li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <h3>Usage Examples</h3>
+      <div class="code-block" style="font-size:0.82rem;">
+<span class="dim"># Allow UID 1000</span>
+cryptofs-admin policy add \
+  --dir /mnt/decrypted \
+  --type uid --value 1000 \
+  --perm allow
+
+<span class="dim"># Allow by binary hash (tamper-resistant)</span>
+SHA=$(sha256sum /usr/bin/myapp | awk '{print $1}')
+cryptofs-admin policy add \
+  --dir /mnt/decrypted \
+  --type binary-hash --value $SHA \
+  --perm allow
+
+<span class="dim"># List &amp; remove</span>
+cryptofs-admin policy list
+cryptofs-admin policy remove &lt;rule-id&gt;
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 14: PERFORMANCE  ════════════════════════ -->
+<div class="slide" data-slide="13">
+  <h2 class="anim">Performance</h2>
+  <div class="cols anim anim-d1">
+    <div>
+      <h3>Design for Speed</h3>
+      <ul>
+        <li><strong>Per-inode crypto transforms</strong> — allocated once per file, lock-free encrypt/decrypt after init</li>
+        <li><strong>4KB extent-based</strong> — page-aligned, efficient random access without decrypting entire files</li>
+        <li><strong>Hardware AES acceleration</strong> — uses AES-NI (x86) or ARMv8 CE automatically via kernel Crypto API</li>
+        <li><strong>Deterministic nonces</strong> — no disk I/O for nonce storage</li>
+        <li><strong>Concurrent I/O</strong> — no global locks on the encrypt/decrypt hot path</li>
+      </ul>
+      <h3 class="mt2">Benchmarking</h3>
+      <div class="code-block" style="font-size:0.85rem;">
+<span class="dim"># Run fio benchmarks</span>
+make bench
+
+<span class="dim"># Compare encrypted vs. native</span>
+make bench-compare
+
+<span class="dim"># Docker-based (encrypted + baseline)</span>
+make docker-bench
+      </div>
+    </div>
+    <div>
+      <h3>Expected Overhead</h3>
+      <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
+        <div class="stat-card">
+          <div class="stat-value" style="font-size:1.6rem;">2-5%</div>
+          <div class="stat-label">Sequential I/O overhead<br>(with AES-NI)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="font-size:1.6rem;">5-10%</div>
+          <div class="stat-label">Random 4K I/O overhead<br>(with AES-NI)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="font-size:1.6rem;">~0.4%</div>
+          <div class="stat-label">Storage overhead<br>(per MB)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="font-size:1.6rem;">0</div>
+          <div class="stat-label">Locks on encrypt/<br>decrypt hot path</div>
+        </div>
+      </div>
+      <h3 class="mt2">Per-Inode Crypto (Lock-Free)</h3>
+      <div class="code-block" style="font-size:0.78rem;">
+<span class="dim">// Each inode has its own AES-GCM + HMAC transform</span>
+struct cryptofs_inode_info {
+    struct crypto_aead  *tfm;       <span class="dim">// AES-256-GCM</span>
+    struct crypto_shash *hmac_tfm;  <span class="dim">// HMAC-SHA256</span>
+    bool crypto_initialized;
+};
+<span class="dim">// Key set once → concurrent encrypt/decrypt</span>
+<span class="dim">// with stack-allocated request descriptors</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 15: TESTING  ════════════════════════ -->
+<div class="slide" data-slide="14">
+  <h2 class="anim">Comprehensive Test Suite</h2>
+  <div class="cols anim anim-d1">
+    <div>
+      <h3>Test Coverage</h3>
+      <table class="info-table" style="font-size:0.88rem;">
+        <thead><tr><th>Suite</th><th>Tests</th><th>Validates</th></tr></thead>
+        <tbody>
+          <tr><td>Basic ops</td><td>18</td><td>CRUD, permissions, symlinks, large files</td></tr>
+          <tr><td>Random access</td><td>6</td><td>Seek, partial reads, extent boundaries</td></tr>
+          <tr><td>Append</td><td>5</td><td>Append, mixed append+read</td></tr>
+          <tr><td>Concurrent</td><td>4</td><td>Parallel reads/writes, file locking</td></tr>
+          <tr><td>Policy</td><td>4+</td><td>UID auth/unauth enforcement</td></tr>
+          <tr><td>Docker</td><td>5</td><td>Container access, volume persistence</td></tr>
+          <tr><td>Crypto verify</td><td>20</td><td>Userspace AES-GCM path (no kernel)</td></tr>
+          <tr><td>Encryption demo</td><td>26</td><td>Full crypto format + tamper detection</td></tr>
+          <tr><td>Stress test</td><td>10 sections</td><td>Up to 500MB, SHA-256 data integrity</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>One-Command Full Pipeline</h3>
+      <div class="terminal" style="max-width:100%;">
+        <div class="terminal-bar">
+          <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+          <span class="terminal-title">build_and_test.sh</span>
+        </div>
+        <div class="terminal-body" style="font-size:0.78rem;">
+          <span class="prompt">$ </span><span class="cmd">./build_and_test.sh --stress heavy</span><br><br>
+          <span class="output">  ✓  Kernel module build</span><br>
+          <span class="output">  ✓  Daemon build</span><br>
+          <span class="output">  ✓  CLI build</span><br>
+          <span class="output">  ✓  Daemon unit tests</span><br>
+          <span class="output">  ✓  Load kernel module</span><br>
+          <span class="output">  ✓  Mount cryptofs</span><br>
+          <span class="output">  ✓  Basic file operations   18/18</span><br>
+          <span class="output">  ✓  Random access            6/6</span><br>
+          <span class="output">  ✓  Append operations        5/5</span><br>
+          <span class="output">  ✓  Concurrent access        4/4</span><br>
+          <span class="output">  ✓  UID policy               4/4</span><br>
+          <span class="output">  ✓  Stress test (heavy)     87/87</span><br><br>
+          <span class="highlight">  ═══════════════════════════════</span><br>
+          <span class="highlight">    ✓  ALL SUITES PASSED</span><br>
+          <span class="highlight">  ═══════════════════════════════</span>
+        </div>
+      </div>
+      <div class="code-block mt" style="font-size:0.82rem;">
+<span class="dim"># Quick alternatives</span>
+make full-test          <span class="dim"># medium stress</span>
+make full-test-all      <span class="dim"># heavy + Docker + bench</span>
+make test-crypto        <span class="dim"># crypto only (Docker)</span>
+make demo               <span class="dim"># write files to host</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 16: ARCHITECTURE SUMMARY  ════════════════════════ -->
+<div class="slide" data-slide="15">
+  <h2 class="anim">Architecture Summary</h2>
+  <div class="diagram wide anim anim-d1" style="max-width:920px;">
+    <div class="diagram-row" style="gap:24px;">
+      <div class="box" style="min-width:160px;">
+        <div class="box-label">CLI</div>
+        cryptofs-admin
+      </div>
+      <div class="box" style="min-width:160px;">
+        <div class="box-label">DAEMON</div>
+        cryptofs-keyd
+      </div>
+      <div class="box" style="min-width:200px;">
+        <div class="box-label">APPLICATIONS</div>
+        cat, vim, nginx, …
+      </div>
+    </div>
+    <div class="diagram-row" style="gap:40px;">
+      <span class="dim" style="font-size:0.8rem;">netlink ↕</span>
+      <span class="dim" style="font-size:0.8rem;">keyring ↕</span>
+      <span class="dim" style="font-size:0.8rem;">syscalls ↕</span>
+    </div>
+    <div class="diagram-row">
+      <div class="box active-box" style="min-width:600px;">
+        <div class="box-label">KERNEL MODULE</div>
+        <div style="display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:8px;">
+          <span style="font-size:0.85rem;">Policy Engine</span>
+          <span style="font-size:0.85rem;">Crypto Engine</span>
+          <span style="font-size:0.85rem;">VFS Ops</span>
+          <span style="font-size:0.85rem;">Netlink</span>
+          <span style="font-size:0.85rem;">Audit Ring</span>
+        </div>
+      </div>
+    </div>
+    <div class="arrow">↕</div>
+    <div class="diagram-row">
+      <div class="box" style="min-width:400px;">
+        <div class="box-label">LOWER FILESYSTEM</div>
+        Encrypted files (header + AES-256-GCM extents + auth tags)
+      </div>
+    </div>
+  </div>
+  <div class="cols mt2 anim anim-d2" style="max-width:800px;">
+    <div class="card center-text">
+      <p><strong>12 kernel source files</strong></p>
+      <p class="dim" style="font-size:0.85rem;">main, super, dentry, lookup, file, inode, crypto, mmap, policy, netlink, audit + header</p>
+    </div>
+    <div class="card center-text">
+      <p><strong>Rust userspace</strong></p>
+      <p class="dim" style="font-size:0.85rem;">cryptofs-keyd (keystore, provider, keyring, API, audit) + cryptofs-admin CLI</p>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 17: SUMMARY  ════════════════════════ -->
+<div class="slide" data-slide="16">
+  <div class="center-text">
+    <h1 class="anim" style="font-size:2.6rem;">CryptoFS</h1>
+    <p class="subtitle anim anim-d1">Transparent, Per-File, Kernel-Level Encryption for Linux</p>
+
+    <div class="stat-grid anim anim-d2" style="max-width:900px; margin:0 auto;">
+      <div class="stat-card">
+        <div class="stat-value" style="font-size:1.5rem;">AES-256-GCM</div>
+        <div class="stat-label">Authenticated encryption</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="font-size:1.5rem;">Per-File Keys</div>
+        <div class="stat-label">Compromising one ≠ all</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="font-size:1.5rem;">Zero Changes</div>
+        <div class="stat-label">Apps work unmodified</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="font-size:1.5rem;">Lock-Free</div>
+        <div class="stat-label">Per-inode crypto transforms</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="font-size:1.5rem;">5 Policy Types</div>
+        <div class="stat-label">UID, GID, path, hash, name</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="font-size:1.5rem;">90+ Tests</div>
+        <div class="stat-label">Comprehensive test suite</div>
+      </div>
+    </div>
+
+    <div class="mt2 anim anim-d3">
+      <p style="font-size:1.1rem;">
+        <span class="accent">make all</span> &nbsp;→&nbsp;
+        <span class="accent">insmod cryptofs.ko</span> &nbsp;→&nbsp;
+        <span class="accent">mount -t cryptofs</span> &nbsp;→&nbsp;
+        <span class="accent-green">done.</span>
+      </p>
+    </div>
+    <p class="dim mt2 anim anim-d4" style="font-size:0.9rem;">GPL-2.0 • Linux 6.1+ • Stacks on ext4/xfs/btrfs • Docker compatible</p>
+  </div>
+</div>
+
+</div><!-- end .deck -->
+
+<!-- ── Navigation ── -->
+<div class="nav">
+  <button id="prev" onclick="navigate(-1)">←</button>
+  <span class="page-num" id="page-num">1 / 17</span>
+  <button id="next" onclick="navigate(1)">→</button>
+</div>
+<div class="key-hint">
+  <kbd>←</kbd> <kbd>→</kbd> or <kbd>Space</kbd> to navigate
+</div>
+
+<script>
+(function() {
+  const slides = document.querySelectorAll('.slide');
+  const total = slides.length;
+  const progress = document.getElementById('progress');
+  const pageNum = document.getElementById('page-num');
+  const prevBtn = document.getElementById('prev');
+  const nextBtn = document.getElementById('next');
+  let current = 0;
+
+  function show(idx) {
+    if (idx < 0 || idx >= total) return;
+    slides[current].classList.remove('active');
+    slides[current].classList.add('exit');
+    setTimeout(() => slides[current === idx ? current : current].classList.remove('exit'), 500);
+    const prev = current;
+    current = idx;
+    // Remove exit from all, add active to current
+    setTimeout(() => {
+      slides.forEach((s, i) => {
+        s.classList.remove('active', 'exit');
+        if (i === current) s.classList.add('active');
+      });
+    }, 20);
+    progress.style.width = ((current + 1) / total * 100) + '%';
+    pageNum.textContent = (current + 1) + ' / ' + total;
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = current === total - 1;
+  }
+
+  window.navigate = function(dir) { show(current + dir); };
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); navigate(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); navigate(-1); }
+    else if (e.key === 'Home') { e.preventDefault(); show(0); }
+    else if (e.key === 'End') { e.preventDefault(); show(total - 1); }
+  });
+
+  // Touch support
+  let touchX = 0;
+  document.addEventListener('touchstart', e => { touchX = e.touches[0].clientX; });
+  document.addEventListener('touchend', e => {
+    const dx = e.changedTouches[0].clientX - touchX;
+    if (Math.abs(dx) > 50) navigate(dx < 0 ? 1 : -1);
+  });
+
+  // Init
+  show(0);
+})();
+</script>
+</body>
+</html>
