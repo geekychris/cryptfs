@@ -139,8 +139,8 @@ done
 wait
 
 # Verify all temp files cleaned up
-REMAINING=$(ls "${TEST_DIR}"/rapid_*.tmp 2>/dev/null | wc -l || echo 0)
-if [ "$REMAINING" = "0" ]; then
+REMAINING=$(find "${TEST_DIR}" -maxdepth 1 -name 'rapid_*.tmp' -type f 2>/dev/null | wc -l)
+if [ "$REMAINING" -eq 0 ]; then
     log_pass "Rapid create/delete cycle ($((NUM_WORKERS * 50)) ops)"
 else
     log_fail "Rapid create/delete left $REMAINING files"
