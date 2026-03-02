@@ -40,7 +40,7 @@ static int cryptofs_open(struct inode *inode, struct file *file)
 	 * encrypt-write cycle in write_iter can read back existing extents.
 	 * Strip creation flags — the lower file already exists.
 	 */
-	lower_flags = file->f_flags & ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
+	lower_flags = file->f_flags & ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_APPEND);
 	if ((lower_flags & O_ACCMODE) == O_WRONLY)
 		lower_flags = (lower_flags & ~O_ACCMODE) | O_RDWR;
 
@@ -282,6 +282,10 @@ static ssize_t cryptofs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	bool authorized;
 	loff_t pos = iocb->ki_pos;
 	size_t count = iov_iter_count(iter);
+
+	/* Handle O_APPEND: start writing at the end of file */
+	if (iocb->ki_flags & IOCB_APPEND)
+		pos = i_size_read(inode);
 	ssize_t total_written = 0;
 	u8 *plain_buf = NULL;
 	u8 *cipher_buf = NULL;
