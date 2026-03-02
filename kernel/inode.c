@@ -10,6 +10,24 @@
 #include "cryptofs.h"
 
 /*
+ * lock_parent: get the parent of a lower dentry and lock its inode.
+ * The caller must call unlock_dir() when done.
+ */
+static struct dentry *lock_parent(struct dentry *dentry)
+{
+	struct dentry *dir = dget_parent(dentry);
+
+	inode_lock_nested(d_inode(dir), I_MUTEX_PARENT);
+	return dir;
+}
+
+static void unlock_dir(struct dentry *dir)
+{
+	inode_unlock(d_inode(dir));
+	dput(dir);
+}
+
+/*
  * Helper: create a lower file/dir and interpose.
  */
 static int cryptofs_create(struct mnt_idmap *idmap,
@@ -18,14 +36,13 @@ static int cryptofs_create(struct mnt_idmap *idmap,
 {
 	struct dentry *lower_dentry;
 	struct dentry *lower_parent_dentry;
-	struct path lower_path, lower_parent_path;
+	struct path lower_path;
 	int err;
 
 	cryptofs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
 
-	cryptofs_get_lower_path(dentry->d_parent, &lower_parent_path);
-	lower_parent_dentry = lower_parent_path.dentry;
+	lower_parent_dentry = lock_parent(lower_dentry);
 
 	err = vfs_create(idmap, d_inode(lower_parent_dentry),
 			 lower_dentry, mode, excl);
@@ -44,7 +61,7 @@ static int cryptofs_create(struct mnt_idmap *idmap,
 			   dentry->d_name.name);
 
 out:
-	cryptofs_put_lower_path(dentry->d_parent, &lower_parent_path);
+	unlock_dir(lower_parent_dentry);
 	cryptofs_put_lower_path(dentry, &lower_path);
 	return err;
 }
@@ -58,14 +75,13 @@ static int cryptofs_mkdir(struct mnt_idmap *idmap,
 {
 	struct dentry *lower_dentry;
 	struct dentry *lower_parent_dentry;
-	struct path lower_path, lower_parent_path;
+	struct path lower_path;
 	int err;
 
 	cryptofs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
 
-	cryptofs_get_lower_path(dentry->d_parent, &lower_parent_path);
-	lower_parent_dentry = lower_parent_path.dentry;
+	lower_parent_dentry = lock_parent(lower_dentry);
 
 	err = vfs_mkdir(idmap, d_inode(lower_parent_dentry),
 			lower_dentry, mode);
@@ -81,7 +97,7 @@ static int cryptofs_mkdir(struct mnt_idmap *idmap,
 	set_nlink(dir, d_inode(lower_parent_dentry)->i_nlink);
 
 out:
-	cryptofs_put_lower_path(dentry->d_parent, &lower_parent_path);
+	unlock_dir(lower_parent_dentry);
 	cryptofs_put_lower_path(dentry, &lower_path);
 	return err;
 }
@@ -93,24 +109,28 @@ static int cryptofs_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	struct dentry *lower_dentry;
 	struct dentry *lower_dir_dentry;
-	struct path lower_path, lower_dir_path;
+	struct path lower_path;
 	int err;
 
 	cryptofs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
 
-	cryptofs_get_lower_path(dentry->d_parent, &lower_dir_path);
-	lower_dir_dentry = lower_dir_path.dentry;
+	lower_dir_dentry = lock_parent(lower_dentry);
 
+	dget(dentry);
 	err = vfs_rmdir(&nop_mnt_idmap, d_inode(lower_dir_dentry), lower_dentry);
+	dput(dentry);
 	if (!err) {
-		d_drop(dentry);
+		if (d_inode(dentry))
+			clear_nlink(d_inode(dentry));
 		fsstack_copy_attr_times(dir, d_inode(lower_dir_dentry));
 		fsstack_copy_inode_size(dir, d_inode(lower_dir_dentry));
 		set_nlink(dir, d_inode(lower_dir_dentry)->i_nlink);
 	}
 
-	cryptofs_put_lower_path(dentry->d_parent, &lower_dir_path);
+	unlock_dir(lower_dir_dentry);
+	if (!err)
+		d_drop(dentry);
 	cryptofs_put_lower_path(dentry, &lower_path);
 	return err;
 }
@@ -122,14 +142,13 @@ static int cryptofs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct dentry *lower_dentry;
 	struct dentry *lower_dir_dentry;
-	struct path lower_path, lower_dir_path;
+	struct path lower_path;
 	int err;
 
 	cryptofs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
 
-	cryptofs_get_lower_path(dentry->d_parent, &lower_dir_path);
-	lower_dir_dentry = lower_dir_path.dentry;
+	lower_dir_dentry = lock_parent(lower_dentry);
 
 	err = vfs_unlink(&nop_mnt_idmap, d_inode(lower_dir_dentry), lower_dentry, NULL);
 	if (!err) {
@@ -138,7 +157,7 @@ static int cryptofs_unlink(struct inode *dir, struct dentry *dentry)
 		fsstack_copy_inode_size(dir, d_inode(lower_dir_dentry));
 	}
 
-	cryptofs_put_lower_path(dentry->d_parent, &lower_dir_path);
+	unlock_dir(lower_dir_dentry);
 	cryptofs_put_lower_path(dentry, &lower_path);
 	return err;
 }
@@ -155,8 +174,8 @@ static int cryptofs_rename(struct mnt_idmap *idmap,
 	struct dentry *lower_new_dentry;
 	struct dentry *lower_old_dir_dentry;
 	struct dentry *lower_new_dir_dentry;
+	struct dentry *trap;
 	struct path lower_old_path, lower_new_path;
-	struct path lower_old_dir_path, lower_new_dir_path;
 	struct renamedata rd;
 	int err;
 
@@ -168,10 +187,20 @@ static int cryptofs_rename(struct mnt_idmap *idmap,
 	cryptofs_get_lower_path(new_dentry, &lower_new_path);
 	lower_new_dentry = lower_new_path.dentry;
 
-	cryptofs_get_lower_path(old_dentry->d_parent, &lower_old_dir_path);
-	lower_old_dir_dentry = lower_old_dir_path.dentry;
-	cryptofs_get_lower_path(new_dentry->d_parent, &lower_new_dir_path);
-	lower_new_dir_dentry = lower_new_dir_path.dentry;
+	dget(lower_old_dentry);
+	dget(lower_new_dentry);
+	lower_old_dir_dentry = dget_parent(lower_old_dentry);
+	lower_new_dir_dentry = dget_parent(lower_new_dentry);
+
+	trap = lock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
+	if (trap == lower_old_dentry) {
+		err = -EINVAL;
+		goto out;
+	}
+	if (trap == lower_new_dentry) {
+		err = -ENOTEMPTY;
+		goto out;
+	}
 
 	rd.old_mnt_idmap = idmap;
 	rd.old_dir = d_inode(lower_old_dir_dentry);
@@ -188,8 +217,12 @@ static int cryptofs_rename(struct mnt_idmap *idmap,
 		fsstack_copy_attr_all(old_dir, d_inode(lower_old_dir_dentry));
 	}
 
-	cryptofs_put_lower_path(new_dentry->d_parent, &lower_new_dir_path);
-	cryptofs_put_lower_path(old_dentry->d_parent, &lower_old_dir_path);
+out:
+	unlock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
+	dput(lower_new_dir_dentry);
+	dput(lower_old_dir_dentry);
+	dput(lower_new_dentry);
+	dput(lower_old_dentry);
 	cryptofs_put_lower_path(new_dentry, &lower_new_path);
 	cryptofs_put_lower_path(old_dentry, &lower_old_path);
 	return err;
@@ -214,6 +247,13 @@ static int cryptofs_getattr(struct mnt_idmap *idmap,
 
 	cryptofs_get_lower_path(dentry, &lower_path);
 	lower_inode = d_inode(lower_path.dentry);
+
+	if (!lower_inode) {
+		pr_err("cryptofs_getattr: NULL lower_inode for %s!\n",
+		       dentry->d_name.name);
+		cryptofs_put_lower_path(dentry, &lower_path);
+		return -ESTALE;
+	}
 
 	/* Sync attributes from the lower inode (times, mode, uid, gid, etc.) */
 	cryptofs_copy_inode_attr(inode, lower_inode);
@@ -277,6 +317,43 @@ static int cryptofs_setattr(struct mnt_idmap *idmap,
 }
 
 /*
+ * get_link: read symlink target from the lower filesystem.
+ *
+ * In RCU walk mode (dentry == NULL) we cannot safely look up the lower
+ * path, so return -ECHILD to let the VFS retry in REF-walk mode.
+ */
+static const char *cryptofs_get_link(struct dentry *dentry,
+				     struct inode *inode,
+				     struct delayed_call *done)
+{
+	const char *link;
+	struct dentry *lower_dentry;
+	struct inode *lower_inode;
+	struct path lower_path;
+
+	if (!dentry)
+		return ERR_PTR(-ECHILD);
+
+	cryptofs_get_lower_path(dentry, &lower_path);
+	lower_dentry = lower_path.dentry;
+	lower_inode = d_inode(lower_dentry);
+
+	if (!lower_inode || !lower_inode->i_op ||
+	    !lower_inode->i_op->get_link) {
+		/* Lower filesystem has no get_link; try i_link directly */
+		link = READ_ONCE(lower_inode->i_link);
+		if (!link)
+			link = ERR_PTR(-EINVAL);
+	} else {
+		link = lower_inode->i_op->get_link(lower_dentry,
+						   lower_inode, done);
+	}
+
+	cryptofs_put_lower_path(dentry, &lower_path);
+	return link;
+}
+
+/*
  * symlink: create a symbolic link.
  */
 static int cryptofs_symlink(struct mnt_idmap *idmap,
@@ -285,13 +362,13 @@ static int cryptofs_symlink(struct mnt_idmap *idmap,
 {
 	struct dentry *lower_dentry;
 	struct dentry *lower_parent_dentry;
-	struct path lower_path, lower_parent_path;
+	struct path lower_path;
 	int err;
 
 	cryptofs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
-	cryptofs_get_lower_path(dentry->d_parent, &lower_parent_path);
-	lower_parent_dentry = lower_parent_path.dentry;
+
+	lower_parent_dentry = lock_parent(lower_dentry);
 
 	err = vfs_symlink(idmap, d_inode(lower_parent_dentry),
 			  lower_dentry, symname);
@@ -305,7 +382,7 @@ static int cryptofs_symlink(struct mnt_idmap *idmap,
 	fsstack_copy_attr_times(dir, d_inode(lower_parent_dentry));
 
 out:
-	cryptofs_put_lower_path(dentry->d_parent, &lower_parent_path);
+	unlock_dir(lower_parent_dentry);
 	cryptofs_put_lower_path(dentry, &lower_path);
 	return err;
 }
@@ -319,15 +396,15 @@ static int cryptofs_link(struct dentry *old_dentry, struct inode *dir,
 	struct dentry *lower_old_dentry;
 	struct dentry *lower_new_dentry;
 	struct dentry *lower_dir_dentry;
-	struct path lower_old_path, lower_new_path, lower_dir_path;
+	struct path lower_old_path, lower_new_path;
 	int err;
 
 	cryptofs_get_lower_path(old_dentry, &lower_old_path);
 	lower_old_dentry = lower_old_path.dentry;
 	cryptofs_get_lower_path(new_dentry, &lower_new_path);
 	lower_new_dentry = lower_new_path.dentry;
-	cryptofs_get_lower_path(new_dentry->d_parent, &lower_dir_path);
-	lower_dir_dentry = lower_dir_path.dentry;
+
+	lower_dir_dentry = lock_parent(lower_new_dentry);
 
 	err = vfs_link(lower_old_dentry, &nop_mnt_idmap,
 		       d_inode(lower_dir_dentry), lower_new_dentry, NULL);
@@ -341,7 +418,7 @@ static int cryptofs_link(struct dentry *old_dentry, struct inode *dir,
 	fsstack_copy_attr_times(dir, d_inode(lower_dir_dentry));
 
 out:
-	cryptofs_put_lower_path(new_dentry->d_parent, &lower_dir_path);
+	unlock_dir(lower_dir_dentry);
 	cryptofs_put_lower_path(new_dentry, &lower_new_path);
 	cryptofs_put_lower_path(old_dentry, &lower_old_path);
 	return err;
@@ -357,6 +434,13 @@ const struct inode_operations cryptofs_dir_iops = {
 	.mkdir		= cryptofs_mkdir,
 	.rmdir		= cryptofs_rmdir,
 	.rename		= cryptofs_rename,
+	.setattr	= cryptofs_setattr,
+	.getattr	= cryptofs_getattr,
+};
+
+/* Symlink inode operations */
+const struct inode_operations cryptofs_symlink_iops = {
+	.get_link	= cryptofs_get_link,
 	.setattr	= cryptofs_setattr,
 	.getattr	= cryptofs_getattr,
 };

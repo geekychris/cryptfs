@@ -21,6 +21,7 @@ static int cryptofs_open(struct inode *inode, struct file *file)
 	struct dentry *lower_dentry;
 	struct inode *lower_inode;
 	struct super_block *sb = inode->i_sb;
+	int lower_flags;
 	int err = 0;
 
 	/* Allocate our per-file info */
@@ -33,8 +34,17 @@ static int cryptofs_open(struct inode *inode, struct file *file)
 	lower_dentry = lower_path.dentry;
 	lower_inode = d_inode(lower_dentry);
 
-	/* Open the lower file */
-	lower_file = dentry_open(&lower_path, file->f_flags, current_cred());
+	/*
+	 * Open the lower file.  When the upper file is opened for writing
+	 * (O_WRONLY), upgrade to O_RDWR so that the read-decrypt-modify-
+	 * encrypt-write cycle in write_iter can read back existing extents.
+	 * Strip creation flags — the lower file already exists.
+	 */
+	lower_flags = file->f_flags & ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
+	if ((lower_flags & O_ACCMODE) == O_WRONLY)
+		lower_flags = (lower_flags & ~O_ACCMODE) | O_RDWR;
+
+	lower_file = dentry_open(&lower_path, lower_flags, current_cred());
 	if (IS_ERR(lower_file)) {
 		err = PTR_ERR(lower_file);
 		kfree(file_info);
@@ -44,17 +54,48 @@ static int cryptofs_open(struct inode *inode, struct file *file)
 	file_info->lower_file = lower_file;
 	file->private_data = file_info;
 
-	/* For regular files, ensure FEK is loaded if file has a header */
-	if (S_ISREG(inode->i_mode) && i_size_read(lower_inode) > 0) {
-		err = cryptofs_ensure_fek(inode);
-		if (err && err != -ENODATA) {
-			/* -ENODATA means no header yet (new file) */
-			fput(lower_file);
-			kfree(file_info);
-			file->private_data = NULL;
-			goto out;
+	/*
+	 * For regular files that already have data, try to load the FEK
+	 * from the on-disk header.  This is needed when the inode was
+	 * evicted and recreated since the last open.
+	 */
+	if (S_ISREG(inode->i_mode) && !CRYPTOFS_I(inode)->fek_loaded &&
+	    i_size_read(lower_inode) >= CRYPTOFS_HEADER_SIZE) {
+		struct cryptofs_inode_info *iinfo = CRYPTOFS_I(inode);
+
+		mutex_lock(&iinfo->fek_mutex);
+		if (!iinfo->fek_loaded) {
+			struct cryptofs_file_header hdr;
+
+			err = cryptofs_read_file_header(lower_file, &hdr);
+			if (!err) {
+				struct cryptofs_sb_info *sbi = CRYPTOFS_SB(sb);
+
+				err = cryptofs_unwrap_fek(sbi,
+						hdr.encrypted_fek,
+						hdr.fek_nonce,
+						hdr.encrypted_fek + CRYPTOFS_KEY_SIZE,
+						iinfo->fek);
+				if (!err) {
+					err = cryptofs_inode_crypto_init(iinfo,
+									iinfo->fek);
+					if (!err) {
+						iinfo->fek_loaded = true;
+						inode->i_size = le64_to_cpu(hdr.file_size);
+					}
+				}
+			}
+			/*
+			 * Non-fatal: the FEK will be generated on the
+			 * first write if this is a new/empty file.
+			 */
+			if (err) {
+				pr_debug("cryptofs: FEK load deferred for ino %lu: %d\n",
+					 inode->i_ino, err);
+				err = 0;
+			}
 		}
-		err = 0;
+		mutex_unlock(&iinfo->fek_mutex);
 	}
 
 	cryptofs_audit_log(CRYPTOFS_AUDIT_OPEN, inode,

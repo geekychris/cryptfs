@@ -79,9 +79,9 @@ static int cryptofs_read_folio(struct file *file, struct folio *folio)
 		memcpy(tag, extent_buf + CRYPTOFS_EXTENT_SIZE,
 		       CRYPTOFS_TAG_SIZE);
 
-		err = cryptofs_decrypt_extent(sbi, iinfo->fek,
-					      inode->i_ino, extent_idx,
-					      extent_buf, tag, page_data);
+		err = cryptofs_decrypt_extent(iinfo, inode->i_ino,
+					      extent_idx, extent_buf,
+					      tag, page_data);
 		if (err) {
 			pr_warn("cryptofs: mmap decrypt failed for inode %lu page %lu\n",
 				inode->i_ino, index);

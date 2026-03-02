@@ -318,6 +318,7 @@ extern struct dentry *cryptofs_mount(struct file_system_type *fs_type,
 /* ========== Function declarations: inode.c ========== */
 
 extern const struct inode_operations cryptofs_dir_iops;
+extern const struct inode_operations cryptofs_symlink_iops;
 extern const struct inode_operations cryptofs_main_iops;
 struct inode *cryptofs_iget(struct super_block *sb, struct inode *lower_inode);
 void cryptofs_copy_inode_attr(struct inode *dest, const struct inode *src);

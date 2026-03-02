@@ -29,7 +29,7 @@ int cryptofs_interpose(struct dentry *dentry, struct super_block *sb,
 		goto out;
 	}
 
-	d_add(dentry, inode);
+	d_instantiate(dentry, inode);
 
 out:
 	return err;
@@ -58,10 +58,8 @@ struct dentry *cryptofs_lookup(struct inode *dir, struct dentry *dentry,
 
 	/* Perform the actual lookup in the lower filesystem */
 	name = dentry->d_name.name;
-	inode_lock(d_inode(lower_dir_dentry));
-	lower_dentry = lookup_one_len(name, lower_dir_dentry,
-				      dentry->d_name.len);
-	inode_unlock(d_inode(lower_dir_dentry));
+	lower_dentry = lookup_one_len_unlocked(name, lower_dir_dentry,
+					       dentry->d_name.len);
 	if (IS_ERR(lower_dentry)) {
 		err = PTR_ERR(lower_dentry);
 		goto out_put_parent;
@@ -163,8 +161,16 @@ struct inode *cryptofs_iget(struct super_block *sb, struct inode *lower_inode)
 	/* Copy attributes from lower inode */
 	cryptofs_copy_inode_attr(inode, lower_inode);
 
-	/* Set file size: for regular files, the logical size is stored in header */
-	inode->i_size = lower_inode->i_size;
+	/*
+	 * Set file size.  For regular files the logical (plaintext) size
+	 * is stored in the on-disk header and will be loaded during
+	 * cryptofs_open().  Use 0 here so that reads before the header
+	 * is parsed return nothing rather than raw ciphertext.
+	 */
+	if (S_ISREG(lower_inode->i_mode))
+		inode->i_size = 0;
+	else
+		inode->i_size = lower_inode->i_size;
 
 	/* Set operations based on inode type */
 	if (S_ISREG(inode->i_mode)) {
@@ -177,7 +183,7 @@ struct inode *cryptofs_iget(struct super_block *sb, struct inode *lower_inode)
 		inode->i_op = &cryptofs_dir_iops;
 		inode->i_fop = &cryptofs_dir_fops;
 	} else if (S_ISLNK(inode->i_mode)) {
-		inode->i_op = &cryptofs_main_iops;
+		inode->i_op = &cryptofs_symlink_iops;
 	} else {
 		inode->i_op = &cryptofs_main_iops;
 		init_special_inode(inode, inode->i_mode,

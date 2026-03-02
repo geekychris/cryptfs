@@ -37,6 +37,7 @@ LOWER_DIR="${LOWER_DIR:-/tmp/cryptofs_lower}"
 MOUNT_DIR="${MOUNT_DIR:-/tmp/cryptofs_mount}"
 STRESS_LEVEL="${STRESS_LEVEL:-medium}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
+SUITE_TIMEOUT=120
 SKIP_BUILD=false
 INCLUDE_BENCH=false
 INCLUDE_DOCKER=false
@@ -207,8 +208,16 @@ if is_linux; then
                 --pid-file /tmp/cryptofs_test.pid \
                 &
             DAEMON_PID=$!
-            sleep 1
-            if kill -0 "${DAEMON_PID}" 2>/dev/null; then
+            # Poll for daemon readiness (wait for socket to appear)
+            READY=false
+            for _i in $(seq 1 10); do
+                sleep 1
+                if [ -S /tmp/cryptofs_test.sock ] && kill -0 "${DAEMON_PID}" 2>/dev/null; then
+                    READY=true
+                    break
+                fi
+            done
+            if ${READY}; then
                 record_suite "Start daemon" 0
                 TEARDOWN_NEEDED=true
             else
@@ -266,12 +275,16 @@ run_test_script() {
     fi
 
     local OUTPUT RC
-    OUTPUT=$(bash "${SCRIPT}" 2>&1) || true
+    OUTPUT=$(timeout ${SUITE_TIMEOUT} bash "${SCRIPT}" 2>&1)
     RC=$?
 
     # Extract pass/fail counts from output
     local SUMMARY
-    SUMMARY=$(echo "${OUTPUT}" | grep -i "Results:" | tail -1)
+    if [ "${RC}" -eq 124 ]; then
+        SUMMARY="TIMED OUT after ${SUITE_TIMEOUT}s"
+    else
+        SUMMARY=$(echo "${OUTPUT}" | grep -i "Results:" | tail -1)
+    fi
 
     if [ "${RC}" -eq 0 ]; then
         record_suite "${NAME}" 0 "${SUMMARY}"
