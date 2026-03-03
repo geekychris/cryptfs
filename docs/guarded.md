@@ -118,6 +118,81 @@ If a user's session keyring does not contain the required key:
 
 ---
 
+## Real-World Example: Encrypting Solr Indexes
+
+CryptoFS is a **stacked overlay filesystem**. You choose what to encrypt by choosing what to mount it over. The key insight: you can mount CryptoFS at **the same path** as the lower directory, so the application sees no difference — its files just happen to be encrypted on disk.
+
+### Same-path (overlay) mount
+
+Stop Solr, mount CryptoFS over its data directory, start Solr again. Solr never knows.
+
+```bash
+# Stop Solr first
+sudo systemctl stop solr
+
+# Mount CryptoFS over the SAME path
+sudo mount -t cryptofs /var/solr/data /var/solr/data
+
+# Solr still reads/writes to /var/solr/data — it has no idea.
+# On disk the files are encrypted; through the mount they're plaintext.
+sudo systemctl start solr
+```
+
+What's happening:
+- **Before mount:** `/var/solr/data` is a regular directory on ext4/xfs. Files are plaintext.
+- **After mount:** `/var/solr/data` is now a CryptoFS overlay. New writes go through CryptoFS and are encrypted on disk. Reads are decrypted transparently.
+- **On disk:** The underlying ext4/xfs directory still holds the files, but they contain CryptoFS headers + AES-256-GCM ciphertext.
+- **Unmount:** `sudo umount /var/solr/data` removes the overlay. Direct access to the directory now shows raw ciphertext.
+
+### Separate-path mount
+
+You can also use a separate lower directory if you prefer to keep ciphertext in a different location:
+
+```bash
+mkdir -p /data/solr-encrypted
+sudo mount -t cryptofs /data/solr-encrypted /var/solr/data
+
+# Solr writes to /var/solr/data → ciphertext lands in /data/solr-encrypted/
+```
+
+### Multiple mounts
+
+You can encrypt different directory trees independently, each with their own keys and policies:
+
+```bash
+# Encrypt Solr indexes
+sudo mount -t cryptofs /var/solr/data /var/solr/data
+cryptofs-admin policy add --dir /var/solr/data \
+    --type uid --value 8983 --perm allow \
+    --key-id $SOLR_KEY --access-mode transparent
+
+# Encrypt Elasticsearch data (different key)
+sudo mount -t cryptofs /var/lib/elasticsearch /var/lib/elasticsearch
+cryptofs-admin policy add --dir /var/lib/elasticsearch \
+    --type uid --value 1000 --perm allow \
+    --key-id $ES_KEY --access-mode transparent
+
+# Encrypt PostgreSQL tablespace (guarded mode)
+sudo mount -t cryptofs /var/lib/postgresql/data /var/lib/postgresql/data
+cryptofs-admin policy add --dir /var/lib/postgresql/data \
+    --type uid --value 5432 --perm allow \
+    --key-id $PG_KEY --access-mode guarded
+```
+
+Each mount is independent — different keys, different policies, different access modes. Unmounting one has no effect on the others.
+
+### Persistent mounts via /etc/fstab
+
+```bash
+# Add to /etc/fstab for automatic mount on boot
+/var/solr/data            /var/solr/data            cryptofs defaults 0 0
+/var/lib/elasticsearch    /var/lib/elasticsearch    cryptofs defaults 0 0
+```
+
+The key daemon must be running and keys activated before the mounts will work. Set up `cryptofs-keyd` as a systemd service that starts before these mounts.
+
+---
+
 # Installing the Kernel Module
 
 ## Ubuntu (x86_64 and ARM64)

@@ -263,39 +263,62 @@
 
 <!-- ════════════════════════  SLIDE 3: HOW IT WORKS  ════════════════════════ -->
 <div class="slide" data-slide="2">
-  <h2 class="anim">How It Works — Stacked Filesystem</h2>
-  <p class="subtitle anim anim-d1">CryptoFS sits between applications and the underlying filesystem</p>
-  <div class="diagram anim anim-d2">
-    <div class="diagram-row">
-      <div class="box" style="min-width:280px;">
-        <div class="box-label">USERSPACE</div>
-        Applications (cat, vim, nginx, …)
+  <h2 class="anim">How It Works — Stacked Overlay Filesystem</h2>
+  <p class="subtitle anim anim-d1">CryptoFS mounts <em>over</em> an existing directory — even the same path. Apps see no difference.</p>
+  <div class="cols anim anim-d2" style="gap:36px; align-items:flex-start;">
+    <div class="diagram" style="max-width:100%;">
+      <div class="diagram-row">
+        <div class="box" style="min-width:280px;">
+          <div class="box-label">USERSPACE</div>
+          Applications (Solr, Postgres, nginx, …)
+        </div>
+      </div>
+      <div class="arrow">↕ <span style="font-size:0.7rem; color:#64748b;">POSIX syscalls (open, read, write)</span></div>
+      <div class="diagram-row">
+        <div class="box active-box" style="min-width:380px;">
+          <div class="box-label">KERNEL — VFS LAYER</div>
+          <strong style="color:#38bdf8; font-size:1.1rem;">cryptofs.ko</strong><br>
+          <span style="font-size:0.85rem; color:#94a3b8;">Policy → Crypto (AES-256-GCM) → Audit</span>
+        </div>
+      </div>
+      <div class="arrow">↕ <span style="font-size:0.7rem; color:#64748b;">encrypted extents + auth tags</span></div>
+      <div class="diagram-row">
+        <div class="box">
+          <div class="box-label">LOWER FILESYSTEM</div>
+          ext4 / xfs / btrfs / …
+        </div>
+      </div>
+      <div class="cols mt" style="max-width:100%; gap:24px;">
+        <div class="center-text">
+          <p class="accent-green" style="font-weight:600;">✓ Authorized</p>
+          <p class="dim" style="font-size:0.85rem;">Sees plaintext</p>
+        </div>
+        <div class="center-text">
+          <p class="accent-red" style="font-weight:600;">✗ Unauthorized</p>
+          <p class="dim" style="font-size:0.85rem;">Sees ciphertext</p>
+        </div>
       </div>
     </div>
-    <div class="arrow">↕ <span style="font-size:0.7rem; color:#64748b;">POSIX syscalls (open, read, write)</span></div>
-    <div class="diagram-row">
-      <div class="box active-box" style="min-width:500px;">
-        <div class="box-label">KERNEL — VFS LAYER</div>
-        <strong style="color:#38bdf8; font-size:1.1rem;">cryptofs.ko</strong><br>
-        <span style="font-size:0.85rem; color:#94a3b8;">Policy Engine → Crypto Engine (AES-256-GCM) → Audit</span>
+    <div>
+      <h3>Overlay Mount</h3>
+      <p style="font-size:0.92rem;">You choose <strong>what to encrypt</strong> by choosing <strong>what to mount over</strong>. CryptoFS stacks on top of the existing directory:</p>
+      <div class="code-block mt" style="font-size:0.8rem;">
+<span class="dim"># Mount over the SAME path — app config unchanged</span>
+sudo mount -t cryptofs \
+  /var/solr/data /var/solr/data
+
+<span class="dim"># Or use a separate lower dir</span>
+sudo mount -t cryptofs \
+  /data/encrypted /mnt/decrypted
       </div>
-    </div>
-    <div class="arrow">↕ <span style="font-size:0.7rem; color:#64748b;">encrypted extents + auth tags</span></div>
-    <div class="diagram-row">
-      <div class="box">
-        <div class="box-label">LOWER FILESYSTEM</div>
-        ext4 / xfs / btrfs / …
+      <div class="card mt" style="font-size:0.88rem;">
+        <p><strong>Multiple independent mounts:</strong></p>
+        <ul style="font-size:0.85rem;">
+          <li>Each mount = separate directory tree</li>
+          <li>Each can have its own key &amp; policies</li>
+          <li>Unmounting one doesn't affect others</li>
+        </ul>
       </div>
-    </div>
-  </div>
-  <div class="cols mt anim anim-d3" style="max-width:800px;">
-    <div class="center-text">
-      <p class="accent-green" style="font-weight:600;">✓ Authorized process</p>
-      <p class="dim" style="font-size:0.9rem;">Sees plaintext transparently</p>
-    </div>
-    <div class="center-text">
-      <p class="accent-red" style="font-weight:600;">✗ Unauthorized process</p>
-      <p class="dim" style="font-size:0.9rem;">Reads → ciphertext, Writes → EACCES</p>
     </div>
   </div>
 </div>
@@ -928,10 +951,12 @@ key = <span class="accent">cryptofs_resolve_key</span>(sbi, key_id, mode);
           <span class="prompt">$ </span><span class="cmd">cryptofs-admin key unlock f7e2a1b3</span><br>
           <span class="prompt">$ </span><span class="cmd">cryptofs-admin key activate f7e2a1b3</span><br><br>
 
-          <span class="dim"># 3. Mount CryptoFS OVER Solr's data dir</span><br>
+          <span class="dim"># 3. Mount CryptoFS OVER Solr's data dir (overlay)</span><br>
+          <span class="dim">#    Same source &amp; target path — this is a stacked mount.</span><br>
+          <span class="dim">#    Solr's config stays unchanged; it still reads /var/solr/data.</span><br>
           <span class="prompt">$ </span><span class="cmd">sudo mount -t cryptofs \</span><br>
-          <span class="cmd">    /var/solr/data \</span>  <span class="dim"># lower dir (encrypted on disk)</span><br>
-          <span class="cmd">    /var/solr/data</span>   <span class="dim"># same path! (stacked mount)</span><br><br>
+          <span class="cmd">    /var/solr/data \</span>  <span class="dim"># lower dir (ciphertext on disk)</span><br>
+          <span class="cmd">    /var/solr/data</span>   <span class="dim"># same path! (overlay mount)</span><br>
 
           <span class="dim"># 4. Set policy: ONLY the solr user gets plaintext</span><br>
           <span class="prompt">$ </span><span class="cmd">cryptofs-admin policy add \</span><br>
