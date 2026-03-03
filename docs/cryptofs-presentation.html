@@ -226,6 +226,8 @@
       <span class="dim" style="font-size:1rem;">Zero App Changes</span>
       <span class="dim">•</span>
       <span class="dim" style="font-size:1rem;">Per-Process Policies</span>
+      <span class="dim">•</span>
+      <span class="dim" style="font-size:1rem;">Multi-Key Support</span>
     </div>
     <p class="anim anim-d4 dim mt2" style="font-size:0.9rem;">Inspired by Thales CipherTrust Transparent Encryption (CTE)</p>
   </div>
@@ -364,7 +366,7 @@
     <div>
       <h3>Key Hierarchy</h3>
       <div class="code-block" style="font-size:0.85rem;">
-Master Key <span class="dim">(256-bit, Argon2id-protected)</span>
+Master Key(s) <span class="dim">(256-bit, up to 64 in key table)</span>
   └── wraps → <span class="accent">FEK</span> <span class="dim">(256-bit, unique per file)</span>
                 └── derives → <span class="accent-green">Nonce</span> <span class="dim">(96-bit, per extent)</span>
       </div>
@@ -770,8 +772,76 @@ cryptofs-admin policy remove &lt;rule-id&gt;
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 14: KEY HANDOFF  ════════════════════════ -->
+<!-- ════════════════════════  SLIDE 14: MULTI-KEY SUPPORT  ════════════════════════ -->
 <div class="slide" data-slide="13">
+  <h2 class="anim">Multi-Key Support</h2>
+  <p class="subtitle anim anim-d1">Per-user and per-process key assignments with two access models</p>
+  <div class="cols anim anim-d2">
+    <div>
+      <h3>Two Access Modes</h3>
+      <div class="card" style="margin-bottom:16px;">
+        <h3 style="color:#4ade80; font-size:1.1rem;">🔓 Transparent</h3>
+        <p style="font-size:0.9rem;">Admin pre-loads keys into the kernel key table. All authorized processes decrypt automatically.</p>
+        <div class="code-block mt" style="font-size:0.78rem;">
+<span class="dim"># Admin loads key into kernel</span>
+cryptofs-admin key activate a1b2c3d4
+<span class="dim"># → Stored in kernel key table</span>
+<span class="dim"># → Policy-matched processes use it</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="color:#fbbf24; font-size:1.1rem;">🔐 Guarded</h3>
+        <p style="font-size:0.9rem;">Each user unlocks their own key into their session keyring. Only that user's processes can decrypt.</p>
+        <div class="code-block mt" style="font-size:0.78rem;">
+<span class="dim"># User unlocks key into session keyring</span>
+cryptofs-admin session-unlock a1b2c3d4
+<span class="dim"># → Daemon validates passphrase</span>
+<span class="dim"># → Key → user's SESSION_KEYRING</span>
+<span class="dim"># → Kernel calls request_key() per-process</span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>Key Table &amp; Policy Binding</h3>
+      <div class="diagram" style="max-width:100%; gap:6px;">
+        <div class="diagram-row">
+          <div class="box" style="min-width:280px;">
+            <div class="box-label">KERNEL KEY TABLE (up to 64 keys)</div>
+            Key <span class="accent">a1b2c3d4</span> → 256-bit master<br>
+            Key <span class="accent">f7e2a1b3</span> → 256-bit master<br>
+            Key <span class="accent">00000000</span> → default (V1 compat)
+          </div>
+        </div>
+        <div class="arrow">↕ <span style="font-size:0.7rem;">policy binds key_id + access_mode per rule</span></div>
+        <div class="diagram-row" style="gap:16px;">
+          <div class="box" style="border-color:#4ade80; min-width:160px;">
+            <div class="box-label" style="color:#4ade80;">TRANSPARENT</div>
+            Kernel table lookup
+          </div>
+          <div class="box" style="border-color:#fbbf24; min-width:160px;">
+            <div class="box-label" style="color:#fbbf24;">GUARDED</div>
+            request_key() from<br>session keyring
+          </div>
+        </div>
+      </div>
+      <h3 class="mt2">Policy Example</h3>
+      <div class="code-block" style="font-size:0.78rem;">
+<span class="dim"># Bind key + mode to a policy rule</span>
+cryptofs-admin policy add \
+  --dir /mnt/decrypted \
+  --type uid --value 1000 \
+  --key-id a1b2c3d4 \
+  --access-mode guarded --perm allow
+      </div>
+      <div class="card mt">
+        <p style="font-size:0.88rem;"><strong>Backward compatible:</strong> V1 files use key_id = zeros → default key. No policies → allow-all, default key, transparent mode.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════  SLIDE 15: KEY HANDOFF  ════════════════════════ -->
+<div class="slide" data-slide="14">
   <h2 class="anim">How Does the App Get the Key?</h2>
   <p class="subtitle anim anim-d1">It doesn't. The kernel holds the key and decides per-syscall who sees plaintext.</p>
   <div class="cols anim anim-d2">
@@ -785,7 +855,7 @@ cryptofs-admin policy remove &lt;rule-id&gt;
         <div class="diagram-row">
           <div class="box active-box" style="min-width:350px;">
             <div class="box-label">KERNEL MODULE (cryptofs.ko)</div>
-            Holds master key + all per-file FEKs<br>
+            Holds key table + per-file FEKs<br>
             <span style="font-size:0.85rem; color:#94a3b8;">On every read()/write() syscall:</span><br>
             <span style="font-size:0.85rem; color:#fbbf24;">→ Inspects the calling process</span><br>
             <span style="font-size:0.85rem; color:#fbbf24;">→ Checks UID, binary path/hash, etc.</span><br>
@@ -808,23 +878,22 @@ cryptofs-admin policy remove &lt;rule-id&gt;
     <div>
       <h3>What the kernel checks</h3>
       <div class="code-block" style="font-size:0.78rem;">
-<span class="dim">// Called on EVERY read/write — kernel/file.c:118</span>
-authorized = cryptofs_policy_check(sbi, inode);
+<span class="dim">// Called on EVERY read/write — kernel/file.c</span>
+rc = cryptofs_policy_check(sbi, inode,
+                           &amp;key_id, &amp;mode);
 
-<span class="dim">// Inspects the calling process — policy.c:195</span>
-bool cryptofs_policy_check(...) {
-  const struct cred *cred = <span class="accent">current_cred()</span>;
-  <span class="dim">// → UID, GID of the calling process</span>
-
-  exe_file = <span class="accent">current->mm->exe_file</span>;
-  <span class="dim">// → binary path and SHA-256 hash</span>
-
-  <span class="accent">current->comm</span>;
-  <span class="dim">// → process name</span>
-
-  <span class="dim">// First matching rule wins.</span>
+<span class="dim">// Returns key_id + access_mode for the caller</span>
+int cryptofs_policy_check(...,
+    u8 *key_id, enum cryptofs_access_mode *mode) {
+  <span class="dim">// Inspects UID, GID, binary path/hash, comm</span>
+  <span class="dim">// First matching rule → copies key_id + mode</span>
   <span class="dim">// No match → DENY (return ciphertext)</span>
 }
+
+<span class="dim">// Resolve key material by access mode</span>
+key = <span class="accent">cryptofs_resolve_key</span>(sbi, key_id, mode);
+<span class="dim">// TRANSPARENT → kernel key table lookup</span>
+<span class="dim">// GUARDED    → request_key() from session keyring</span>
       </div>
       <div class="card mt">
         <p style="font-size:0.95rem;"><strong>Key point:</strong> The application has <em>zero awareness</em> of encryption. It never touches a key. The kernel intercepts its syscalls and transparently encrypts or decrypts based on policy.</p>
@@ -833,8 +902,8 @@ bool cryptofs_policy_check(...) {
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 15: SOLR EXAMPLE  ════════════════════════ -->
-<div class="slide" data-slide="14">
+<!-- ════════════════════════  SLIDE 16: SOLR EXAMPLE  ════════════════════════ -->
+<div class="slide" data-slide="15">
   <h2 class="anim">Real-World Example: Encrypting Solr Indexes</h2>
   <div class="cols anim anim-d1" style="gap:36px;">
     <div>
@@ -920,8 +989,8 @@ bool cryptofs_policy_check(...) {
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 16: PERFORMANCE  ════════════════════════ -->
-<div class="slide" data-slide="15">
+<!-- ════════════════════════  SLIDE 17: PERFORMANCE  ════════════════════════ -->
+<div class="slide" data-slide="16">
   <h2 class="anim">Performance</h2>
   <div class="cols anim anim-d1">
     <div>
@@ -980,8 +1049,8 @@ struct cryptofs_inode_info {
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 17: TESTING  ════════════════════════ -->
-<div class="slide" data-slide="16">
+<!-- ════════════════════════  SLIDE 18: TESTING  ════════════════════════ -->
+<div class="slide" data-slide="17">
   <h2 class="anim">Comprehensive Test Suite</h2>
   <div class="cols anim anim-d1">
     <div>
@@ -1038,8 +1107,8 @@ make demo               <span class="dim"># write files to host</span>
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 18: ARCHITECTURE SUMMARY  ════════════════════════ -->
-<div class="slide" data-slide="17">
+<!-- ════════════════════════  SLIDE 19: ARCHITECTURE SUMMARY  ════════════════════════ -->
+<div class="slide" data-slide="18">
   <h2 class="anim">Architecture Summary</h2>
   <div class="diagram wide anim anim-d1" style="max-width:920px;">
     <div class="diagram-row" style="gap:24px;">
@@ -1067,6 +1136,7 @@ make demo               <span class="dim"># write files to host</span>
         <div style="display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:8px;">
           <span style="font-size:0.85rem;">Policy Engine</span>
           <span style="font-size:0.85rem;">Crypto Engine</span>
+          <span style="font-size:0.85rem;">Key Table</span>
           <span style="font-size:0.85rem;">VFS Ops</span>
           <span style="font-size:0.85rem;">Netlink</span>
           <span style="font-size:0.85rem;">Audit Ring</span>
@@ -1093,8 +1163,8 @@ make demo               <span class="dim"># write files to host</span>
   </div>
 </div>
 
-<!-- ════════════════════════  SLIDE 19: SUMMARY  ════════════════════════ -->
-<div class="slide" data-slide="18">
+<!-- ════════════════════════  SLIDE 20: SUMMARY  ════════════════════════ -->
+<div class="slide" data-slide="19">
   <div class="center-text">
     <h1 class="anim" style="font-size:2.6rem;">CryptoFS</h1>
     <p class="subtitle anim anim-d1">Transparent, Per-File, Kernel-Level Encryption for Linux</p>
@@ -1113,8 +1183,8 @@ make demo               <span class="dim"># write files to host</span>
         <div class="stat-label">Apps work unmodified</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value" style="font-size:1.5rem;">Lock-Free</div>
-        <div class="stat-label">Per-inode crypto transforms</div>
+        <div class="stat-value" style="font-size:1.5rem;">Multi-Key</div>
+        <div class="stat-label">Transparent + Guarded modes</div>
       </div>
       <div class="stat-card">
         <div class="stat-value" style="font-size:1.5rem;">5 Policy Types</div>
@@ -1143,7 +1213,7 @@ make demo               <span class="dim"># write files to host</span>
 <!-- ── Navigation ── -->
 <div class="nav">
   <button id="prev" onclick="navigate(-1)">←</button>
-  <span class="page-num" id="page-num">1 / 19</span>
+  <span class="page-num" id="page-num">1 / 20</span>
   <button id="next" onclick="navigate(1)">→</button>
 </div>
 <div class="key-hint">
