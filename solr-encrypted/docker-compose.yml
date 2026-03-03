@@ -1,0 +1,34 @@
+# Solr with Encrypted Index
+#
+# Usage:
+#   docker compose up -d          # Start Solr with encrypted index
+#   ./demo.sh                     # Index sample data and search
+#   docker compose down            # Stop and unmount
+#
+# The host-mounted volume at ./encrypted_data contains only ciphertext.
+# Plaintext is only visible inside the running container via FUSE.
+
+services:
+  solr-encrypted:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solr-encrypted
+    ports:
+      - "8983:8983"
+    volumes:
+      # Host-mounted encrypted data — only ciphertext visible on host
+      - ./encrypted_data:/data/encrypted
+    environment:
+      - ENCRYPTION_PASSWORD=${ENCRYPTION_PASSWORD:-solr-encrypted-demo}
+    # Required for FUSE (gocryptfs) inside the container
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8983/solr/admin/info/system || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
