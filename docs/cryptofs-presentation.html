@@ -790,14 +790,18 @@ cryptofs-admin key activate a1b2c3d4
         </div>
       </div>
       <div class="card">
-        <h3 style="color:#fbbf24; font-size:1.1rem;">🔐 Guarded</h3>
-        <p style="font-size:0.9rem;">Each user unlocks their own key into their session keyring. Only that user's processes can decrypt.</p>
+        <h3 style="color:#fbbf24; font-size:1.1rem;">🔐 Guarded — User Flow</h3>
+        <p style="font-size:0.9rem;">Each user unlocks their own key. Only their processes can decrypt. Key auto-expires.</p>
         <div class="code-block mt" style="font-size:0.78rem;">
-<span class="dim"># User unlocks key into session keyring</span>
-cryptofs-admin session-unlock a1b2c3d4
-<span class="dim"># → Daemon validates passphrase</span>
-<span class="dim"># → Key → user's SESSION_KEYRING</span>
-<span class="dim"># → Kernel calls request_key() per-process</span>
+<span class="dim"># User runs (prompted for passphrase):</span>
+cryptofs-admin key session-unlock a1b2c3d4
+<span class="dim"># Behind the scenes:</span>
+<span class="dim"># 1. CLI → daemon: validate passphrase</span>
+<span class="dim"># 2. Daemon → CLI: returns key material</span>
+<span class="dim"># 3. CLI calls add_key("logon",</span>
+<span class="dim">#      "cryptofs:&lt;id&gt;", key, SESSION_KEYRING)</span>
+<span class="dim"># 4. cat file.txt → kernel request_key() → ✓</span>
+<span class="dim"># 5. Key expires after --timeout 3600</span>
         </div>
       </div>
     </div>

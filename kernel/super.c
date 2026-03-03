@@ -106,8 +106,8 @@ static void cryptofs_put_super(struct super_block *sb)
 	/* Free policies */
 	cryptofs_policy_free(sbi);
 
-	/* Wipe master key */
-	memzero_explicit(sbi->master_key, CRYPTOFS_KEY_SIZE);
+	/* Free key table (securely wipes all keys) */
+	cryptofs_key_table_free(sbi);
 
 	sb->s_fs_info = NULL;
 	kfree(sbi);
@@ -169,6 +169,9 @@ static int cryptofs_fill_super(struct super_block *sb, void *raw_data,
 		pr_err("cryptofs: failed to init crypto engine: %d\n", err);
 		goto out_deactivate;
 	}
+
+	/* Initialize key table (multi-key support) */
+	cryptofs_key_table_init(sbi);
 
 	/* Initialize policy engine */
 	err = cryptofs_policy_init(sbi);

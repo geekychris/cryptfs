@@ -122,10 +122,14 @@ encrypted_fs/
 │       └── commands/
 │           ├── mod.rs       # Command dispatch
 │           ├── mount.rs     # mount / umount subcommands
-│           ├── key.rs       # key generate / list / unlock / activate / rotate / etc.
+│           ├── key.rs       # key generate / list / unlock / activate / rotate / session-unlock
 │           ├── policy.rs    # policy add / list / remove
 │           ├── status.rs    # status display
 │           └── audit.rs     # audit log query
+│
+├── tools/
+│   ├── set_key.c                # Inject master key into kernel via netlink
+│   └── add_policy.c             # Add access policy via netlink (with key_id + access_mode)
 │
 ├── tests/
 │   ├── integration/
@@ -134,6 +138,7 @@ encrypted_fs/
 │   │   ├── test_append.sh         # 5 tests: append, mixed append+read
 │   │   ├── test_concurrent.sh     # 4 tests: parallel writes/reads, file locking
 │   │   ├── test_policy_uid.sh     # UID policy enforcement
+│   │   ├── test_guarded_key.sh    # 9 tests: guarded access mode (session keyring)
 │   │   ├── test_docker.sh         # 5 tests: container access, auth/unauth
 │   │   └── test_stress.sh         # 10-section exhaustive data integrity validation
 │   └── bench/
@@ -426,6 +431,87 @@ cryptofs-admin policy remove <rule-id>
 
 ---
 
+## Multi-Key Support
+
+CryptoFS v2 supports multiple master keys (up to 64) with two access models that control how the kernel resolves key material at runtime.
+
+### Access modes
+
+| Mode | Key source | Use case |
+|---|---|---|
+| **Transparent** (default) | Kernel key table | Admin pre-loads keys; all authorized processes share them automatically |
+| **Guarded** | Process session keyring | Each user unlocks their own key; only that user's processes can decrypt |
+
+### Transparent mode
+
+The admin activates keys into the kernel key table. Any process matching a policy rule bound to that key gets automatic decryption:
+
+```bash
+# Admin loads key into the kernel key table
+cryptofs-admin key unlock <key-id>
+cryptofs-admin key activate <key-id>
+
+# All authorized processes decrypt automatically — no per-user action needed
+```
+
+This is the default behavior and is backward compatible with v1 (single-key) configurations.
+
+### Guarded mode
+
+The key must be present in the calling process's Linux session keyring. The kernel resolves it at file-open time via `request_key()`:
+
+```bash
+# Step 1: User unlocks the key into their own session keyring
+cryptofs-admin key session-unlock <key-id>
+#   → CLI prompts for passphrase
+#   → Daemon validates passphrase, returns key material
+#   → CLI calls add_key("logon", "cryptofs:<key_id_hex>", key_data, SESSION_KEYRING)
+
+# Step 2: User's processes can now decrypt files bound to that key
+cat /mnt/decrypted/secret.txt    # → plaintext (key found in session keyring)
+
+# Step 3: Key can be revoked or will expire after optional timeout
+cryptofs-admin key session-unlock <key-id> --timeout 3600   # auto-expire in 1 hour
+```
+
+**How it works under the hood:**
+1. Process opens a file → kernel's `cryptofs_open()` runs
+2. Policy engine matches the process (e.g. by UID) → returns `key_id` + `access_mode = GUARDED`
+3. Kernel calls `request_key(&key_type_logon, "cryptofs:<key_id_hex>", NULL)`
+4. Linux keyring subsystem searches the process's session keyring
+5. If found → FEK is unwrapped → file is decrypted
+6. If not found → `ENOKEY` → file open fails or returns ciphertext
+
+### Policy binding
+
+Each policy rule can optionally specify a `key_id` and `access_mode`:
+
+```bash
+# Transparent: admin manages the key, user auto-decrypts
+cryptofs-admin policy add --dir /mnt/decrypted \
+    --type uid --value 1000 --perm allow \
+    --key-id a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+    --access-mode transparent
+
+# Guarded: user must unlock their own key
+cryptofs-admin policy add --dir /mnt/decrypted \
+    --type uid --value 2000 --perm allow \
+    --key-id f7e2a1b3-0000-0000-0000-000000000000 \
+    --access-mode guarded
+```
+
+### Key table
+
+The kernel maintains an in-memory key table (up to 64 entries). Keys are added via the `SET_KEY` netlink command (typically by `cryptofs-admin key activate`). The table maps 16-byte key IDs to 256-bit master keys.
+
+### Backward compatibility
+
+- **V1 files** have `key_id = all-zeros` in their header → maps to the default key
+- **No policies configured** → allow-all with default key + transparent mode (PoC convenience)
+- **`SET_KEY` without `key_id`** → stores as the default key (all-zeros ID)
+
+---
+
 ## Docker Integration
 
 ### Recommended: host-mount approach
@@ -498,6 +584,7 @@ make full-test-all            # heavy + Docker + benchmarks
 | `test_append.sh` | 5 | Append, mixed append+read, multi-append |
 | `test_concurrent.sh` | 4 | Parallel writes, parallel reads, mixed r/w, file locking |
 | `test_policy_uid.sh` | — | UID-based access policy enforcement |
+| `test_guarded_key.sh` | 9 | Guarded access mode: session keyring inject/revoke/re-inject |
 | `test_docker.sh` | 5 | Container read/write, auth/unauth containers, volume persistence |
 | `test_stress.sh` | 10 sections | Graduated sizes (0 B–500 MB), patterns, extent boundaries, overwrites, appends, random-offset patches, concurrent workers, file churn, unmount/remount persistence, large-file streaming |
 

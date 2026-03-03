@@ -74,6 +74,12 @@ pub enum ApiRequest {
     AuditList {
         count: Option<usize>,
     },
+    /// Unlock a key and return material for session-keyring injection
+    SessionUnlock {
+        key_id: String,
+        passphrase: String,
+        timeout: Option<u32>,
+    },
 }
 
 /// API response
@@ -345,7 +351,30 @@ async fn handle_request(
             }).collect();
             ApiResponse::ok(serde_json::json!({ "events": events_json }))
         }
+
+        ApiRequest::SessionUnlock { key_id, passphrase, timeout } => {
+            let mut state = state.write().await;
+            if let Err(e) = state.keystore.unlock_key(&key_id, &passphrase) {
+                return ApiResponse::err(format!("Failed to unlock: {}", e));
+            }
+            match state.keystore.get_key(&key_id) {
+                Ok(key_data) => {
+                    state.audit.log(AuditEvent::key_unlocked(&key_id));
+                    ApiResponse::ok(serde_json::json!({
+                        "key_id": key_id,
+                        "key_hex": hex_encode(&key_data),
+                        "timeout": timeout.unwrap_or(0),
+                    }))
+                }
+                Err(e) => ApiResponse::err(format!("Key not available: {}", e)),
+            }
+        }
     }
+}
+
+/// Simple hex encoder
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Simple hex decoder (avoids adding another dependency)

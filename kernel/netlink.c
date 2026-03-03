@@ -21,6 +21,9 @@ static const struct nla_policy cryptofs_nl_policy[CRYPTOFS_ATTR_MAX + 1] = {
 					    .len = CRYPTOFS_MAX_PATH_LEN },
 	[CRYPTOFS_ATTR_MASTER_KEY]	= { .type = NLA_BINARY,
 					    .len = CRYPTOFS_KEY_SIZE },
+	[CRYPTOFS_ATTR_KEY_ID]		= { .type = NLA_BINARY,
+					    .len = CRYPTOFS_KEY_ID_SIZE },
+	[CRYPTOFS_ATTR_ACCESS_MODE]	= { .type = NLA_U32 },
 	[CRYPTOFS_ATTR_MOUNT_PATH]	= { .type = NLA_STRING, .len = PATH_MAX },
 	[CRYPTOFS_ATTR_STATUS]		= { .type = NLA_STRING, .len = 4096 },
 };
@@ -100,6 +103,16 @@ static int cryptofs_nl_add_policy(struct sk_buff *skb, struct genl_info *info)
 		return -EINVAL;
 	}
 
+	/* Optional key binding */
+	if (info->attrs[CRYPTOFS_ATTR_KEY_ID] &&
+	    nla_len(info->attrs[CRYPTOFS_ATTR_KEY_ID]) == CRYPTOFS_KEY_ID_SIZE)
+		memcpy(rule->key_id,
+		       nla_data(info->attrs[CRYPTOFS_ATTR_KEY_ID]),
+		       CRYPTOFS_KEY_ID_SIZE);
+	if (info->attrs[CRYPTOFS_ATTR_ACCESS_MODE])
+		rule->access_mode = nla_get_u32(
+			info->attrs[CRYPTOFS_ATTR_ACCESS_MODE]);
+
 	ret = cryptofs_policy_add(sbi, rule);
 	kfree(rule);
 	return (ret > 0) ? 0 : ret;
@@ -125,12 +138,14 @@ static int cryptofs_nl_del_policy(struct sk_buff *skb, struct genl_info *info)
 	return cryptofs_policy_del(sbi, rule_id);
 }
 
-/* CMD: Set master key */
+/* CMD: Set master key (stores in key table; optional KEY_ID attr) */
 static int cryptofs_nl_set_key(struct sk_buff *skb, struct genl_info *info)
 {
 	struct cryptofs_sb_info *sbi;
 	const void *key_data;
 	int key_len;
+	u8 key_id[CRYPTOFS_KEY_ID_SIZE];
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -148,13 +163,77 @@ static int cryptofs_nl_set_key(struct sk_buff *skb, struct genl_info *info)
 	if (key_len != CRYPTOFS_KEY_SIZE)
 		return -EINVAL;
 
-	memcpy(sbi->master_key, key_data, CRYPTOFS_KEY_SIZE);
-	sbi->master_key_loaded = true;
+	/* Optional key_id; default is all-zeros (backward compat) */
+	memset(key_id, 0, sizeof(key_id));
+	if (info->attrs[CRYPTOFS_ATTR_KEY_ID] &&
+	    nla_len(info->attrs[CRYPTOFS_ATTR_KEY_ID]) == CRYPTOFS_KEY_ID_SIZE)
+		memcpy(key_id, nla_data(info->attrs[CRYPTOFS_ATTR_KEY_ID]),
+		       CRYPTOFS_KEY_ID_SIZE);
 
-	pr_info("cryptofs: master key loaded (%d bytes)\n", key_len);
+	ret = cryptofs_key_table_add(sbi, key_id, key_data);
+	if (ret)
+		return ret;
+
+	pr_info("cryptofs: key loaded (key_id %*phN)\n",
+		CRYPTOFS_KEY_ID_SIZE, key_id);
 	cryptofs_audit_log(CRYPTOFS_AUDIT_KEY_LOAD, NULL, true, "");
 
 	return 0;
+}
+
+/* CMD: Delete a key from the key table */
+static int cryptofs_nl_del_key(struct sk_buff *skb, struct genl_info *info)
+{
+	struct cryptofs_sb_info *sbi;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	sbi = get_active_sbi();
+	if (!sbi)
+		return -ENODEV;
+
+	if (!info->attrs[CRYPTOFS_ATTR_KEY_ID] ||
+	    nla_len(info->attrs[CRYPTOFS_ATTR_KEY_ID]) != CRYPTOFS_KEY_ID_SIZE)
+		return -EINVAL;
+
+	return cryptofs_key_table_del(sbi,
+			nla_data(info->attrs[CRYPTOFS_ATTR_KEY_ID]));
+}
+
+/* CMD: List key IDs in the key table */
+static int cryptofs_nl_list_keys(struct sk_buff *skb, struct genl_info *info)
+{
+	struct cryptofs_sb_info *sbi;
+	struct cryptofs_key_entry *entry;
+	struct sk_buff *msg;
+	void *hdr;
+
+	sbi = get_active_sbi();
+	if (!sbi)
+		return -ENODEV;
+
+	msg = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
+			  &cryptofs_genl_family, 0,
+			  CRYPTOFS_CMD_LIST_KEYS);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return -EMSGSIZE;
+	}
+
+	down_read(&sbi->key_table_lock);
+	list_for_each_entry(entry, &sbi->key_table, list) {
+		nla_put(msg, CRYPTOFS_ATTR_KEY_ID,
+			CRYPTOFS_KEY_ID_SIZE, entry->key_id);
+	}
+	up_read(&sbi->key_table_lock);
+
+	genlmsg_end(msg, hdr);
+	return genlmsg_reply(msg, info);
 }
 
 /* CMD: Get status */
@@ -168,9 +247,9 @@ static int cryptofs_nl_get_status(struct sk_buff *skb, struct genl_info *info)
 	sbi = get_active_sbi();
 
 	snprintf(status, sizeof(status),
-		 "{\"mounted\":%s,\"master_key_loaded\":%s,\"policy_count\":%d}",
+		 "{\"mounted\":%s,\"key_count\":%d,\"policy_count\":%d}",
 		 sbi ? "true" : "false",
-		 (sbi && sbi->master_key_loaded) ? "true" : "false",
+		 sbi ? sbi->key_count : 0,
 		 sbi ? sbi->policy_count : 0);
 
 	msg = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
@@ -208,6 +287,15 @@ static const struct genl_small_ops cryptofs_nl_ops[] = {
 		.flags	= GENL_ADMIN_PERM,
 	},
 	{
+		.cmd	= CRYPTOFS_CMD_DEL_KEY,
+		.doit	= cryptofs_nl_del_key,
+		.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= CRYPTOFS_CMD_LIST_KEYS,
+		.doit	= cryptofs_nl_list_keys,
+	},
+	{
 		.cmd	= CRYPTOFS_CMD_GET_STATUS,
 		.doit	= cryptofs_nl_get_status,
 	},
@@ -221,6 +309,7 @@ static struct genl_family cryptofs_genl_family = {
 	.policy		= cryptofs_nl_policy,
 	.small_ops	= cryptofs_nl_ops,
 	.n_small_ops	= ARRAY_SIZE(cryptofs_nl_ops),
+	.resv_start_op	= CRYPTOFS_CMD_GET_AUDIT + 1,
 	.module		= THIS_MODULE,
 };
 

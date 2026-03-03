@@ -46,7 +46,7 @@ static int cryptofs_read_folio(struct file *file, struct folio *folio)
 	}
 
 	/* Check authorization */
-	if (!cryptofs_policy_check(sbi, inode)) {
+	if (!cryptofs_policy_check(sbi, inode, NULL, NULL)) {
 		/* Unauthorized: return raw ciphertext */
 		lower_offset = CRYPTOFS_HEADER_SIZE +
 			       (extent_idx * CRYPTOFS_EXTENT_DISK_SIZE);

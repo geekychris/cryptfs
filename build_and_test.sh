@@ -300,6 +300,7 @@ run_test_script "Random access"            "${TESTS_DIR}/test_random_access.sh"
 run_test_script "Append operations"        "${TESTS_DIR}/test_append.sh"
 run_test_script "Concurrent access"        "${TESTS_DIR}/test_concurrent.sh"
 run_test_script "UID policy"               "${TESTS_DIR}/test_policy_uid.sh"
+run_test_script "Guarded key mode"          "${TESTS_DIR}/test_guarded_key.sh"
 
 # ============================================================================
 # PHASE 5 — STRESS TEST

@@ -190,14 +190,18 @@ out:
  * Check if the current process is authorized to access encrypted data.
  *
  * Iterates through policy rules; first matching rule wins.
- * If no rules match, returns false (DENY / return ciphertext).
+ * If no rules match, returns 0 (DENY / return ciphertext).
+ *
+ * On match, fills out_key_id (16 bytes) and out_mode.
+ * Returns: 1 = authorized, 0 = denied.
  */
-bool cryptofs_policy_check(struct cryptofs_sb_info *sbi,
-			   struct inode *inode)
+int cryptofs_policy_check(struct cryptofs_sb_info *sbi,
+			  struct inode *inode, u8 *out_key_id,
+			  enum cryptofs_access_mode *out_mode)
 {
 	struct cryptofs_policy_rule *rule;
 	const struct cred *cred = current_cred();
-	bool result = false;
+	int result = 0;
 	char exe_path[256];
 	u8 exe_hash[CRYPTOFS_HASH_SIZE];
 	bool exe_path_resolved = false;
@@ -205,10 +209,14 @@ bool cryptofs_policy_check(struct cryptofs_sb_info *sbi,
 
 	spin_lock(&sbi->policy_lock);
 
-	/* If no policies defined, allow all (PoC convenience) */
+	/* If no policies defined, allow all with default key (PoC convenience) */
 	if (list_empty(&sbi->policy_list)) {
 		spin_unlock(&sbi->policy_lock);
-		return true;
+		if (out_key_id)
+			memset(out_key_id, 0, CRYPTOFS_KEY_ID_SIZE);
+		if (out_mode)
+			*out_mode = CRYPTOFS_MODE_TRANSPARENT;
+		return 1;
 	}
 
 	list_for_each_entry(rule, &sbi->policy_list, list) {
@@ -225,12 +233,6 @@ bool cryptofs_policy_check(struct cryptofs_sb_info *sbi,
 
 		case CRYPTOFS_POLICY_BINARY_PATH:
 			if (!exe_path_resolved) {
-				/*
-				 * Note: we're under spinlock, so we can't
-				 * do blocking operations. For production,
-				 * this should use RCU or pre-resolve the path.
-				 * For PoC, we use a trylock approach.
-				 */
 				spin_unlock(&sbi->policy_lock);
 				if (get_current_exe_path(exe_path,
 							 sizeof(exe_path)) > 0)
@@ -263,7 +265,14 @@ bool cryptofs_policy_check(struct cryptofs_sb_info *sbi,
 		}
 
 		if (match) {
-			result = (rule->action == CRYPTOFS_ACTION_ALLOW);
+			if (rule->action == CRYPTOFS_ACTION_ALLOW) {
+				result = 1;
+				if (out_key_id)
+					memcpy(out_key_id, rule->key_id,
+					       CRYPTOFS_KEY_ID_SIZE);
+				if (out_mode)
+					*out_mode = rule->access_mode;
+			}
 			break;
 		}
 	}

@@ -13,6 +13,8 @@
 #include <crypto/hash.h>
 #include <linux/random.h>
 #include <linux/scatterlist.h>
+#include <linux/key.h>
+#include <keys/user-type.h>
 
 /*
  * Initialize the crypto engine for a mount.
@@ -52,7 +54,6 @@ int cryptofs_crypto_init(struct cryptofs_sb_info *sbi)
 
 	sbi->hmac_tfm = hmac_tfm;
 	mutex_init(&sbi->crypto_lock);
-	sbi->master_key_loaded = false;
 
 	return 0;
 }
@@ -320,13 +321,13 @@ int cryptofs_generate_fek(u8 *fek)
 }
 
 /*
- * Wrap (encrypt) a FEK with the master key using AES-256-GCM.
+ * Wrap (encrypt) a FEK with a master key using AES-256-GCM.
  *
- * Input:  fek (32 bytes), master key from sbi
+ * Input:  master_key (32 bytes), fek (32 bytes)
  * Output: wrapped_fek (32 bytes ciphertext), nonce (12 bytes), tag (16 bytes)
  */
-int cryptofs_wrap_fek(struct cryptofs_sb_info *sbi, const u8 *fek,
-		      u8 *wrapped_fek, u8 *nonce, u8 *tag)
+int cryptofs_wrap_fek(struct cryptofs_sb_info *sbi, const u8 *master_key,
+		      const u8 *fek, u8 *wrapped_fek, u8 *nonce, u8 *tag)
 {
 	struct aead_request *req;
 	struct scatterlist sg_src[1], sg_dst[1];
@@ -334,18 +335,13 @@ int cryptofs_wrap_fek(struct cryptofs_sb_info *sbi, const u8 *fek,
 	int err;
 	DECLARE_CRYPTO_WAIT(wait);
 
-	if (!sbi->master_key_loaded) {
-		pr_warn_once("cryptofs: master key not loaded, using zero key for PoC\n");
-		/* For PoC: allow operation with zero key */
-	}
-
 	mutex_lock(&sbi->crypto_lock);
 
 	/* Generate a random nonce for FEK wrapping */
 	get_random_bytes(nonce, CRYPTOFS_NONCE_SIZE);
 
-	/* Set master key */
-	err = crypto_aead_setkey(sbi->tfm, sbi->master_key, CRYPTOFS_KEY_SIZE);
+	/* Set the master key for this operation */
+	err = crypto_aead_setkey(sbi->tfm, master_key, CRYPTOFS_KEY_SIZE);
 	if (err)
 		goto unlock;
 
@@ -391,10 +387,11 @@ unlock:
 }
 
 /*
- * Unwrap (decrypt) a FEK using the master key.
+ * Unwrap (decrypt) a FEK using a master key.
  */
-int cryptofs_unwrap_fek(struct cryptofs_sb_info *sbi, const u8 *wrapped_fek,
-			const u8 *nonce, const u8 *tag, u8 *fek)
+int cryptofs_unwrap_fek(struct cryptofs_sb_info *sbi, const u8 *master_key,
+			const u8 *wrapped_fek, const u8 *nonce, const u8 *tag,
+			u8 *fek)
 {
 	struct aead_request *req;
 	struct scatterlist sg_src[1], sg_dst[1];
@@ -404,8 +401,8 @@ int cryptofs_unwrap_fek(struct cryptofs_sb_info *sbi, const u8 *wrapped_fek,
 
 	mutex_lock(&sbi->crypto_lock);
 
-	/* Set master key */
-	err = crypto_aead_setkey(sbi->tfm, sbi->master_key, CRYPTOFS_KEY_SIZE);
+	/* Set the master key for this operation */
+	err = crypto_aead_setkey(sbi->tfm, master_key, CRYPTOFS_KEY_SIZE);
 	if (err)
 		goto unlock;
 
@@ -446,6 +443,160 @@ int cryptofs_unwrap_fek(struct cryptofs_sb_info *sbi, const u8 *wrapped_fek,
 unlock:
 	mutex_unlock(&sbi->crypto_lock);
 	return err;
+}
+
+/* ========== Key table management ========== */
+
+int cryptofs_key_table_init(struct cryptofs_sb_info *sbi)
+{
+	INIT_LIST_HEAD(&sbi->key_table);
+	init_rwsem(&sbi->key_table_lock);
+	sbi->key_count = 0;
+	return 0;
+}
+
+void cryptofs_key_table_free(struct cryptofs_sb_info *sbi)
+{
+	struct cryptofs_key_entry *entry, *tmp;
+
+	down_write(&sbi->key_table_lock);
+	list_for_each_entry_safe(entry, tmp, &sbi->key_table, list) {
+		list_del(&entry->list);
+		memzero_explicit(entry->key_data, CRYPTOFS_KEY_SIZE);
+		kfree(entry);
+	}
+	sbi->key_count = 0;
+	up_write(&sbi->key_table_lock);
+}
+
+int cryptofs_key_table_add(struct cryptofs_sb_info *sbi,
+			   const u8 *key_id, const u8 *key_data)
+{
+	struct cryptofs_key_entry *entry;
+
+	down_write(&sbi->key_table_lock);
+
+	/* Check if key_id already exists; if so, replace it */
+	list_for_each_entry(entry, &sbi->key_table, list) {
+		if (memcmp(entry->key_id, key_id, CRYPTOFS_KEY_ID_SIZE) == 0) {
+			memcpy(entry->key_data, key_data, CRYPTOFS_KEY_SIZE);
+			up_write(&sbi->key_table_lock);
+			pr_info("cryptofs: replaced key in key table\n");
+			return 0;
+		}
+	}
+
+	if (sbi->key_count >= CRYPTOFS_MAX_KEYS) {
+		up_write(&sbi->key_table_lock);
+		return -ENOSPC;
+	}
+
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry) {
+		up_write(&sbi->key_table_lock);
+		return -ENOMEM;
+	}
+
+	memcpy(entry->key_id, key_id, CRYPTOFS_KEY_ID_SIZE);
+	memcpy(entry->key_data, key_data, CRYPTOFS_KEY_SIZE);
+	list_add_tail(&entry->list, &sbi->key_table);
+	sbi->key_count++;
+	up_write(&sbi->key_table_lock);
+
+	pr_info("cryptofs: added key to key table (%d total)\n", sbi->key_count);
+	return 0;
+}
+
+int cryptofs_key_table_del(struct cryptofs_sb_info *sbi, const u8 *key_id)
+{
+	struct cryptofs_key_entry *entry;
+
+	down_write(&sbi->key_table_lock);
+	list_for_each_entry(entry, &sbi->key_table, list) {
+		if (memcmp(entry->key_id, key_id, CRYPTOFS_KEY_ID_SIZE) == 0) {
+			list_del(&entry->list);
+			sbi->key_count--;
+			up_write(&sbi->key_table_lock);
+			memzero_explicit(entry->key_data, CRYPTOFS_KEY_SIZE);
+			kfree(entry);
+			return 0;
+		}
+	}
+	up_write(&sbi->key_table_lock);
+	return -ENOENT;
+}
+
+/*
+ * Look up a master key in the key table.
+ * Must be called under key_table_lock (read or write).
+ * Returns pointer to key_data or NULL.
+ */
+const u8 *cryptofs_key_lookup(struct cryptofs_sb_info *sbi, const u8 *key_id)
+{
+	struct cryptofs_key_entry *entry;
+
+	list_for_each_entry(entry, &sbi->key_table, list) {
+		if (memcmp(entry->key_id, key_id, CRYPTOFS_KEY_ID_SIZE) == 0)
+			return entry->key_data;
+	}
+	return NULL;
+}
+
+/*
+ * Resolve a master key by mode.
+ *
+ * TRANSPARENT: look up key_id in the kernel key table.
+ * GUARDED: search the calling process's keyring for "cryptofs:<hex key_id>".
+ *
+ * On success, copies 32 bytes of key material into out_key.
+ * Returns 0 on success, negative error otherwise.
+ */
+int cryptofs_resolve_key(struct cryptofs_sb_info *sbi, const u8 *key_id,
+			 enum cryptofs_access_mode mode, u8 *out_key)
+{
+	if (mode == CRYPTOFS_MODE_TRANSPARENT) {
+		const u8 *key_data;
+
+		down_read(&sbi->key_table_lock);
+		key_data = cryptofs_key_lookup(sbi, key_id);
+		if (key_data) {
+			memcpy(out_key, key_data, CRYPTOFS_KEY_SIZE);
+			up_read(&sbi->key_table_lock);
+			return 0;
+		}
+		up_read(&sbi->key_table_lock);
+		return -ENOKEY;
+	}
+
+	if (mode == CRYPTOFS_MODE_GUARDED) {
+		struct key *kr_key;
+		const struct user_key_payload *payload;
+		char desc[48]; /* "cryptofs:" + 32 hex chars + NUL */
+		int i;
+
+		/* Build keyring description: "cryptofs:<hex key_id>" */
+		memcpy(desc, "cryptofs:", 9);
+		for (i = 0; i < CRYPTOFS_KEY_ID_SIZE; i++)
+			snprintf(desc + 9 + i * 2, 3, "%02x", key_id[i]);
+
+		kr_key = request_key(&key_type_logon, desc, NULL);
+		if (IS_ERR(kr_key))
+			return PTR_ERR(kr_key);
+
+		down_read(&kr_key->sem);
+		payload = user_key_payload_locked(kr_key);
+		if (!payload || payload->datalen < CRYPTOFS_KEY_SIZE) {
+			up_read(&kr_key->sem);
+			key_put(kr_key);
+			return -ENOKEY;
+		}
+		memcpy(out_key, payload->data, CRYPTOFS_KEY_SIZE);
+		up_read(&kr_key->sem);
+		key_put(kr_key);
+		return 0;
+	}
+
+	return -EINVAL;
 }
 
 /*

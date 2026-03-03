@@ -23,5 +23,8 @@ tokio = { version = "1", features = ["full"] }
 # Error handling
 anyhow = "1"
 
+# Unix/Linux specifics
+libc = "0.2"
+
 # Misc
 tabled = "0.16"

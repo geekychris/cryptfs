@@ -38,7 +38,7 @@
 
 #define CRYPTOFS_NAME           "cryptofs"
 #define CRYPTOFS_MAGIC          0x43525946  /* "CRYF" */
-#define CRYPTOFS_VERSION        1
+#define CRYPTOFS_VERSION        2
 
 /* File header magic: "CRYPFS01" */
 #define CRYPTOFS_FILE_MAGIC     0x4352595046533031ULL
@@ -53,6 +53,10 @@
 /* On-disk sizes */
 #define CRYPTOFS_HEADER_SIZE    128
 #define CRYPTOFS_EXTENT_DISK_SIZE (CRYPTOFS_EXTENT_SIZE + CRYPTOFS_TAG_SIZE) /* 4112 */
+
+/* Key management constants */
+#define CRYPTOFS_KEY_ID_SIZE    16   /* UUID: 16 bytes */
+#define CRYPTOFS_MAX_KEYS       64   /* max master keys per mount */
 
 /* Policy constants */
 #define CRYPTOFS_MAX_POLICIES   256
@@ -80,11 +84,20 @@ struct cryptofs_file_header {
 	__u8   encrypted_fek[CRYPTOFS_KEY_SIZE + CRYPTOFS_TAG_SIZE]; /* 16: FEK wrapped by master key (48 bytes) */
 	__u8   fek_nonce[CRYPTOFS_NONCE_SIZE];  /*  64: nonce used to wrap FEK */
 	__le64 file_size;                       /*  76: logical (plaintext) file size */
-	__u8   reserved[44];                    /*  84: reserved for future use */
+	__u8   key_id[CRYPTOFS_KEY_ID_SIZE];    /*  84: master key UUID that wraps FEK */
+	__u8   reserved[28];                    /* 100: reserved for future use */
 } __packed;                                     /* Total: 128 bytes */
 
 /* Header flags */
 #define CRYPTOFS_FLAG_ENCRYPTED  0x01
+
+/* ========== Key table entry ========== */
+
+struct cryptofs_key_entry {
+	struct list_head list;
+	u8 key_id[CRYPTOFS_KEY_ID_SIZE];
+	u8 key_data[CRYPTOFS_KEY_SIZE];
+};
 
 /* ========== Per-superblock info ========== */
 
@@ -94,9 +107,10 @@ struct cryptofs_sb_info {
 	struct crypto_shash *hmac_tfm;    /* HMAC-SHA256 for nonce derivation */
 	struct mutex crypto_lock;         /* Serializes access to tfm/hmac_tfm */
 
-	/* Master key (loaded from userspace via keyring/netlink) */
-	u8 master_key[CRYPTOFS_KEY_SIZE];
-	bool master_key_loaded;
+	/* Key table: multiple named master keys */
+	struct list_head key_table;
+	struct rw_semaphore key_table_lock;
+	int key_count;
 
 	/* Policy list for this mount */
 	struct list_head policy_list;
@@ -149,6 +163,12 @@ enum cryptofs_policy_action {
 	CRYPTOFS_ACTION_ALLOW,
 };
 
+/* Access mode: how the master key is resolved at runtime */
+enum cryptofs_access_mode {
+	CRYPTOFS_MODE_TRANSPARENT = 0,   /* Key from kernel key table (auto) */
+	CRYPTOFS_MODE_GUARDED,           /* Key from process keyring (explicit) */
+};
+
 struct cryptofs_policy_rule {
 	struct list_head list;
 	unsigned int id;
@@ -162,6 +182,10 @@ struct cryptofs_policy_rule {
 		u8 binary_hash[CRYPTOFS_HASH_SIZE];
 		char process_name[TASK_COMM_LEN];
 	} match;
+
+	/* Key binding */
+	u8 key_id[CRYPTOFS_KEY_ID_SIZE];          /* master key this rule authorizes */
+	enum cryptofs_access_mode access_mode;    /* transparent vs guarded */
 };
 
 /* ========== Audit entry ========== */
@@ -195,6 +219,8 @@ enum cryptofs_nl_commands {
 	CRYPTOFS_CMD_DEL_POLICY,
 	CRYPTOFS_CMD_LIST_POLICIES,
 	CRYPTOFS_CMD_SET_KEY,
+	CRYPTOFS_CMD_DEL_KEY,
+	CRYPTOFS_CMD_LIST_KEYS,
 	CRYPTOFS_CMD_GET_STATUS,
 	CRYPTOFS_CMD_GET_AUDIT,
 	__CRYPTOFS_CMD_MAX,
@@ -208,6 +234,8 @@ enum cryptofs_nl_attrs {
 	CRYPTOFS_ATTR_POLICY_ACTION,    /* u32 (enum cryptofs_policy_action) */
 	CRYPTOFS_ATTR_POLICY_VALUE,     /* string or binary data */
 	CRYPTOFS_ATTR_MASTER_KEY,       /* binary: 32 bytes */
+	CRYPTOFS_ATTR_KEY_ID,           /* binary: 16 bytes (UUID) */
+	CRYPTOFS_ATTR_ACCESS_MODE,      /* u32: enum cryptofs_access_mode */
 	CRYPTOFS_ATTR_MOUNT_PATH,       /* string: mount point */
 	CRYPTOFS_ATTR_STATUS,           /* string: JSON status */
 	CRYPTOFS_ATTR_AUDIT_ENTRY,      /* nested: audit entry */
@@ -356,10 +384,11 @@ int cryptofs_decrypt_extent(struct cryptofs_inode_info *iinfo,
 			    u64 inode_no, u64 extent_idx,
 			    const u8 *ciphertext, const u8 *tag, u8 *plaintext);
 int cryptofs_generate_fek(u8 *fek);
-int cryptofs_wrap_fek(struct cryptofs_sb_info *sbi, const u8 *fek,
-		      u8 *wrapped_fek, u8 *nonce, u8 *tag);
-int cryptofs_unwrap_fek(struct cryptofs_sb_info *sbi, const u8 *wrapped_fek,
-			const u8 *nonce, const u8 *tag, u8 *fek);
+int cryptofs_wrap_fek(struct cryptofs_sb_info *sbi, const u8 *master_key,
+		      const u8 *fek, u8 *wrapped_fek, u8 *nonce, u8 *tag);
+int cryptofs_unwrap_fek(struct cryptofs_sb_info *sbi, const u8 *master_key,
+			const u8 *wrapped_fek, const u8 *nonce, const u8 *tag,
+			u8 *fek);
 int cryptofs_derive_nonce(struct cryptofs_inode_info *iinfo,
 			  u64 inode_no, u64 extent_idx, u8 *nonce);
 int cryptofs_inode_crypto_init(struct cryptofs_inode_info *iinfo, const u8 *fek);
@@ -369,6 +398,16 @@ int cryptofs_read_file_header(struct file *lower_file,
 int cryptofs_write_file_header(struct file *lower_file,
 			       const struct cryptofs_file_header *hdr);
 int cryptofs_ensure_fek(struct inode *inode);
+
+/* Key table management */
+int cryptofs_key_table_init(struct cryptofs_sb_info *sbi);
+void cryptofs_key_table_free(struct cryptofs_sb_info *sbi);
+int cryptofs_key_table_add(struct cryptofs_sb_info *sbi,
+			   const u8 *key_id, const u8 *key_data);
+int cryptofs_key_table_del(struct cryptofs_sb_info *sbi, const u8 *key_id);
+const u8 *cryptofs_key_lookup(struct cryptofs_sb_info *sbi, const u8 *key_id);
+int cryptofs_resolve_key(struct cryptofs_sb_info *sbi, const u8 *key_id,
+			 enum cryptofs_access_mode mode, u8 *out_key);
 
 /* Offset translation helpers */
 static inline loff_t cryptofs_logical_to_lower(loff_t logical_offset)
@@ -396,8 +435,9 @@ void cryptofs_policy_free(struct cryptofs_sb_info *sbi);
 int cryptofs_policy_add(struct cryptofs_sb_info *sbi,
 			struct cryptofs_policy_rule *rule);
 int cryptofs_policy_del(struct cryptofs_sb_info *sbi, unsigned int rule_id);
-bool cryptofs_policy_check(struct cryptofs_sb_info *sbi,
-			   struct inode *inode);
+int cryptofs_policy_check(struct cryptofs_sb_info *sbi,
+			  struct inode *inode, u8 *out_key_id,
+			  enum cryptofs_access_mode *out_mode);
 
 /* ========== Function declarations: netlink.c ========== */
 

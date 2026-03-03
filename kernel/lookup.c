@@ -79,18 +79,29 @@ struct dentry *cryptofs_lookup(struct inode *dir, struct dentry *dentry,
 	dentry->d_fsdata = info;
 
 	/*
-	 * If the lower dentry has an inode, interpose our inode on top.
+	 * If the lower dentry has an inode, create a cryptofs inode and
+	 * attach it.  We must use d_add() here — NOT d_instantiate() —
+	 * because the VFS passes us an "in-lookup" dentry whose d_u union
+	 * is occupied by d_in_lookup_hash.  d_instantiate() would trigger
+	 * BUG_ON(!hlist_unhashed(&entry->d_u.d_alias)).
+	 *
+	 * d_add() calls __d_add() which properly calls __d_lookup_unhash()
+	 * for in-lookup dentries before setting up the alias.
+	 *
 	 * If it's a negative dentry (doesn't exist), we still set up
 	 * the dentry info so that create operations work later.
 	 */
 	if (d_inode(lower_dentry)) {
-		err = cryptofs_interpose(dentry, dir->i_sb, &lower_path);
-		if (err) {
-			/* Clean up on error */
+		struct inode *inode;
+
+		inode = cryptofs_iget(dir->i_sb, d_inode(lower_dentry));
+		if (IS_ERR(inode)) {
+			err = PTR_ERR(inode);
 			kfree(info);
 			dentry->d_fsdata = NULL;
 			goto out_mntput;
 		}
+		d_add(dentry, inode);
 	} else {
 		/* Negative dentry: file doesn't exist yet */
 		d_add(dentry, NULL);

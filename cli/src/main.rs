@@ -148,6 +148,15 @@ enum KeyCommands {
         /// Key ID
         key_id: String,
     },
+
+    /// Unlock a key into the caller's session keyring (guarded mode)
+    SessionUnlock {
+        /// Key ID to unlock
+        key_id: String,
+        /// Optional timeout in seconds (0 = no timeout)
+        #[arg(long)]
+        timeout: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +239,9 @@ async fn main() -> Result<()> {
                 }
                 KeyCommands::Info { key_id } => {
                     commands::key::info(&cli.socket, &key_id, json_output).await?;
+                }
+                KeyCommands::SessionUnlock { key_id, timeout } => {
+                    commands::key::session_unlock(&cli.socket, &key_id, timeout, json_output).await?;
                 }
             }
         }

@@ -70,12 +70,30 @@ static int cryptofs_open(struct inode *inode, struct file *file)
 			err = cryptofs_read_file_header(lower_file, &hdr);
 			if (!err) {
 				struct cryptofs_sb_info *sbi = CRYPTOFS_SB(sb);
+				u8 pk_id[CRYPTOFS_KEY_ID_SIZE];
+				enum cryptofs_access_mode mode;
+				u8 rkey[CRYPTOFS_KEY_SIZE];
 
-				err = cryptofs_unwrap_fek(sbi,
-						hdr.encrypted_fek,
-						hdr.fek_nonce,
-						hdr.encrypted_fek + CRYPTOFS_KEY_SIZE,
-						iinfo->fek);
+				memset(rkey, 0, sizeof(rkey));
+
+				if (!cryptofs_policy_check(sbi, inode,
+							   pk_id, &mode))
+					err = -EACCES;
+				else if (memcmp(hdr.key_id, pk_id,
+						CRYPTOFS_KEY_ID_SIZE))
+					err = -EACCES;
+				else
+					err = cryptofs_resolve_key(sbi,
+							pk_id, mode, rkey);
+
+				if (!err)
+					err = cryptofs_unwrap_fek(sbi,
+							rkey,
+							hdr.encrypted_fek,
+							hdr.fek_nonce,
+							hdr.encrypted_fek + CRYPTOFS_KEY_SIZE,
+							iinfo->fek);
+				memzero_explicit(rkey, sizeof(rkey));
 				if (!err) {
 					err = cryptofs_inode_crypto_init(iinfo,
 									iinfo->fek);
@@ -99,7 +117,8 @@ static int cryptofs_open(struct inode *inode, struct file *file)
 	}
 
 	cryptofs_audit_log(CRYPTOFS_AUDIT_OPEN, inode,
-			   cryptofs_policy_check(CRYPTOFS_SB(sb), inode),
+			   cryptofs_policy_check(CRYPTOFS_SB(sb), inode,
+						 NULL, NULL),
 			   file->f_path.dentry->d_name.name);
 
 out:
@@ -156,7 +175,7 @@ static ssize_t cryptofs_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	}
 
 	/* Check policy for the calling process */
-	authorized = cryptofs_policy_check(sbi, inode);
+	authorized = cryptofs_policy_check(sbi, inode, NULL, NULL);
 
 	cryptofs_audit_log(CRYPTOFS_AUDIT_READ, inode, authorized,
 			   file->f_path.dentry->d_name.name);
@@ -280,6 +299,8 @@ static ssize_t cryptofs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct cryptofs_inode_info *iinfo = CRYPTOFS_I(inode);
 	struct file *lower_file = cryptofs_lower_file(file);
 	bool authorized;
+	u8 policy_key_id[CRYPTOFS_KEY_ID_SIZE];
+	enum cryptofs_access_mode access_mode;
 	loff_t pos = iocb->ki_pos;
 	size_t count = iov_iter_count(iter);
 
@@ -296,8 +317,9 @@ static ssize_t cryptofs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	if (!count)
 		return 0;
 
-	/* Check policy */
-	authorized = cryptofs_policy_check(sbi, inode);
+	/* Check policy — also retrieve key_id and access mode */
+	authorized = cryptofs_policy_check(sbi, inode,
+					   policy_key_id, &access_mode);
 
 	cryptofs_audit_log(CRYPTOFS_AUDIT_WRITE, inode, authorized,
 			   file->f_path.dentry->d_name.name);
@@ -312,10 +334,22 @@ static ssize_t cryptofs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 		mutex_lock(&iinfo->fek_mutex);
 		if (!iinfo->fek_loaded) {
 			struct cryptofs_file_header hdr;
+			u8 resolved_key[CRYPTOFS_KEY_SIZE];
+
+			/* Resolve the master key for wrapping the FEK */
+			err = cryptofs_resolve_key(sbi, policy_key_id,
+						   access_mode,
+						   resolved_key);
+			if (err) {
+				mutex_unlock(&iinfo->fek_mutex);
+				return err;
+			}
 
 			/* Generate a new FEK for this file */
 			err = cryptofs_generate_fek(iinfo->fek);
 			if (err) {
+				memzero_explicit(resolved_key,
+						 sizeof(resolved_key));
 				mutex_unlock(&iinfo->fek_mutex);
 				return err;
 			}
@@ -326,12 +360,17 @@ static ssize_t cryptofs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 			hdr.version = cpu_to_le32(CRYPTOFS_VERSION);
 			hdr.flags = cpu_to_le32(CRYPTOFS_FLAG_ENCRYPTED);
 			hdr.file_size = cpu_to_le64(0);
+			memcpy(hdr.key_id, policy_key_id,
+			       CRYPTOFS_KEY_ID_SIZE);
 
-			err = cryptofs_wrap_fek(sbi, iinfo->fek,
+			err = cryptofs_wrap_fek(sbi, resolved_key,
+						iinfo->fek,
 						hdr.encrypted_fek,
 						hdr.fek_nonce,
 						hdr.encrypted_fek +
 						    CRYPTOFS_KEY_SIZE);
+			memzero_explicit(resolved_key,
+					 sizeof(resolved_key));
 			if (err) {
 				mutex_unlock(&iinfo->fek_mutex);
 				return err;
