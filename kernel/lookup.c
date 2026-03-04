@@ -187,9 +187,7 @@ struct inode *cryptofs_iget(struct super_block *sb, struct inode *lower_inode)
 	if (S_ISREG(inode->i_mode)) {
 		inode->i_op = &cryptofs_main_iops;
 		inode->i_fop = &cryptofs_main_fops;
-		/* No a_ops: all I/O goes through read_iter/write_iter.
-		 * Page-cache writeback is not supported because we lack
-		 * a lower file handle in the writeback context. */
+		inode->i_mapping->a_ops = &cryptofs_aops;
 	} else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &cryptofs_dir_iops;
 		inode->i_fop = &cryptofs_dir_fops;

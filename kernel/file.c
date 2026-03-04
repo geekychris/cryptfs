@@ -553,11 +553,34 @@ static int cryptofs_flush(struct file *file, fl_owner_t id)
 	return 0;
 }
 
+/*
+ * mmap: set up memory-mapped access to a CryptoFS file.
+ *
+ * Uses generic_file_mmap which hooks into the page cache.
+ * Page faults call cryptofs_read_folio (mmap.c) to decrypt on demand.
+ * Dirty pages are re-dirtied by cryptofs_writepage and flushed
+ * through write_iter on close/fsync.
+ */
+static int cryptofs_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct file *lower_file = cryptofs_lower_file(file);
+
+	/*
+	 * We need the lower file to support read for our read_folio
+	 * to work.  This should always be true for regular files.
+	 */
+	if (!lower_file)
+		return -ENODEV;
+
+	return generic_file_mmap(file, vma);
+}
+
 /* Regular file operations */
 const struct file_operations cryptofs_main_fops = {
 	.llseek		= cryptofs_llseek,
 	.read_iter	= cryptofs_read_iter,
 	.write_iter	= cryptofs_write_iter,
+	.mmap		= cryptofs_mmap,
 	.splice_read	= copy_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.open		= cryptofs_open,

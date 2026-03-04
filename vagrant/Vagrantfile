@@ -13,8 +13,9 @@ Vagrant.configure("2") do |config|
   config.vm.synced_folder "..", "/home/vagrant/cryptofs", type: "rsync",
     rsync__exclude: [".git/", "vagrant/.vagrant/"]
 
-  # Network: forward SSH and key daemon port
+  # Network: forward SSH, key daemon, and Solr ports
   config.vm.network "forwarded_port", guest: 8200, host: 8202
+  config.vm.network "forwarded_port", guest: 8983, host: 8984
 
   config.vm.provider "qemu" do |qe|
     qe.arch = "aarch64"
