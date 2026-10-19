@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Cryptfs logo" width="180">
+</p>
+
 # CryptoFS — Kernel-Level Transparent Encryption Filesystem for Linux
 
 CryptoFS is a Linux kernel module that provides transparent, per-file AES-256-GCM encryption at the VFS layer. Inspired by [Thales CipherTrust Transparent Encryption (CTE)](https://cpl.thalesgroup.com/encryption/transparent-encryption), it allows applications to read and write files normally while all data is encrypted on the underlying storage — no application changes required.
