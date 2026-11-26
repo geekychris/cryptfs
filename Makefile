@@ -12,10 +12,12 @@
 #   make install      - install kernel module + userspace binaries
 #   make vm-up        - start development VM
 #   make vm-ssh       - SSH into development VM
+#   make fuzz-build   - build the libFuzzer crypto harnesses (needs clang)
+#   make fuzz-replay  - replay the checked-in fuzz corpus as a regression gate
 #
 
 .PHONY: all kernel daemon cli test test-stress test-all bench docker-test clean install \
-        vm-up vm-ssh vm-halt check fmt full-test test-crypto demo
+        vm-up vm-ssh vm-halt check fmt full-test test-crypto demo fuzz-build fuzz-replay
 
 # Default: build everything
 all: kernel daemon cli
@@ -111,6 +113,14 @@ full-test-all:
 test-crypto:
 	docker compose -f docker/docker-compose.yml build crypto-verify
 	docker compose -f docker/docker-compose.yml run --rm crypto-verify
+
+# ---- Fuzz Harnesses (libFuzzer, needs clang; opt-in, not part of `test`) ----
+
+fuzz-build:
+	$(MAKE) -C tests/fuzz build
+
+fuzz-replay:
+	$(MAKE) -C tests/fuzz replay
 
 # ---- Encryption Demo (writes files to host for inspection) ----
 

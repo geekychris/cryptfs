@@ -82,3 +82,12 @@ For a logical file offset `L`:
 - **Physical size** (on lower filesystem): `128 + ceil(logical_size / 4096) * 4112`
 - **Overhead per file**: 128 bytes header + 16 bytes per extent
 - **For a 1MB file**: ~4.2 KB overhead (~0.4%)
+
+## Fuzz Testing
+
+The encrypt/decrypt path and this file-size/extent-count arithmetic are
+exercised by libFuzzer harnesses in [`tests/fuzz/`](../tests/fuzz/README.md).
+Note that the header byte-offset table above (with a separate cipher
+algorithm ID, extent size, and master key ID field) is stale relative to
+`struct cryptofs_file_header` in `kernel/cryptofs.h` -- fixing that is out
+of scope for the fuzzing work and left as a follow-up.
