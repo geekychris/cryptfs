@@ -27,4 +27,3 @@ anyhow = "1"
 libc = "0.2"
 
 # Misc
-tabled = "0.16"
