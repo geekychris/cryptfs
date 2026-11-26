@@ -18,8 +18,6 @@
  *  10. Overwrite re-encryption
  */
 
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,29 +25,7 @@
 #include <string.h>
 #include <pthread.h>
 
-/* ── constants (must match kernel/cryptofs.h exactly) ────────────── */
-
-#define CRYPTOFS_KEY_SIZE        32
-#define CRYPTOFS_NONCE_SIZE      12
-#define CRYPTOFS_TAG_SIZE        16
-#define CRYPTOFS_EXTENT_SIZE     4096
-#define CRYPTOFS_EXTENT_DISK_SIZE (CRYPTOFS_EXTENT_SIZE + CRYPTOFS_TAG_SIZE)
-#define CRYPTOFS_HEADER_SIZE     128
-#define CRYPTOFS_FILE_MAGIC      0x4352595046533031ULL
-#define CRYPTOFS_VERSION         1
-#define CRYPTOFS_FLAG_ENCRYPTED  0x01
-
-/* ── on-disk file header (byte-compatible with the kernel struct) ── */
-
-struct cryptofs_file_header {
-    uint64_t magic;
-    uint32_t version;
-    uint32_t flags;
-    uint8_t  encrypted_fek[CRYPTOFS_KEY_SIZE + CRYPTOFS_TAG_SIZE];
-    uint8_t  fek_nonce[CRYPTOFS_NONCE_SIZE];
-    uint64_t file_size;
-    uint8_t  reserved[44];
-} __attribute__((packed));
+#include "cryptofs_crypto.h"
 
 /* ── test bookkeeping ─────────────────────────────────────────────── */
 
@@ -62,172 +38,6 @@ static int fail_count;
     if (fn()) { printf("PASS\n"); pass_count++; }  \
     else       { printf("FAIL\n"); fail_count++; } \
 } while (0)
-
-/* ── helper: little-endian store (matches kernel cpu_to_le64) ───── */
-
-static inline void put_le64(uint8_t *dst, uint64_t v)
-{
-    for (int i = 0; i < 8; i++)
-        dst[i] = (uint8_t)(v >> (i * 8));
-}
-
-static inline uint64_t get_le64(const uint8_t *src)
-{
-    uint64_t v = 0;
-    for (int i = 0; i < 8; i++)
-        v |= (uint64_t)src[i] << (i * 8);
-    return v;
-}
-
-/* ── crypto primitives (mirror kernel/crypto.c) ──────────────────── */
-
-/*
- * Derive nonce = HMAC-SHA256(fek, le64(inode_no) || le64(extent_idx))
- * truncated to 12 bytes.
- */
-static int derive_nonce(const uint8_t *fek, uint64_t inode_no,
-                        uint64_t extent_idx, uint8_t *nonce)
-{
-    uint8_t data[16], hash[32];
-    unsigned int hash_len = 32;
-
-    put_le64(data,     inode_no);
-    put_le64(data + 8, extent_idx);
-
-    if (!HMAC(EVP_sha256(), fek, CRYPTOFS_KEY_SIZE,
-              data, sizeof(data), hash, &hash_len))
-        return -1;
-
-    memcpy(nonce, hash, CRYPTOFS_NONCE_SIZE);
-    return 0;
-}
-
-/*
- * AES-256-GCM encrypt (one extent).
- * plaintext: CRYPTOFS_EXTENT_SIZE bytes
- * ciphertext: CRYPTOFS_EXTENT_SIZE bytes
- * tag: CRYPTOFS_TAG_SIZE bytes
- */
-static int encrypt_extent(const uint8_t *key, const uint8_t *nonce,
-                          const uint8_t *plaintext,
-                          uint8_t *ciphertext, uint8_t *tag)
-{
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    int len, ret = -1;
-
-    if (!ctx) return -1;
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            CRYPTOFS_NONCE_SIZE, NULL) != 1)
-        goto out;
-    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
-        goto out;
-    if (EVP_EncryptUpdate(ctx, ciphertext, &len,
-                          plaintext, CRYPTOFS_EXTENT_SIZE) != 1)
-        goto out;
-    if (EVP_EncryptFinal_ex(ctx, ciphertext + len, &len) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
-                            CRYPTOFS_TAG_SIZE, tag) != 1)
-        goto out;
-    ret = 0;
-out:
-    EVP_CIPHER_CTX_free(ctx);
-    return ret;
-}
-
-/*
- * AES-256-GCM decrypt (one extent).
- * Returns 0 on success, -1 on auth failure.
- */
-static int decrypt_extent(const uint8_t *key, const uint8_t *nonce,
-                          const uint8_t *ciphertext, const uint8_t *tag,
-                          uint8_t *plaintext)
-{
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    int len, ret = -1;
-
-    if (!ctx) return -1;
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            CRYPTOFS_NONCE_SIZE, NULL) != 1)
-        goto out;
-    if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
-        goto out;
-    if (EVP_DecryptUpdate(ctx, plaintext, &len,
-                          ciphertext, CRYPTOFS_EXTENT_SIZE) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
-                            CRYPTOFS_TAG_SIZE, (void *)tag) != 1)
-        goto out;
-    if (EVP_DecryptFinal_ex(ctx, plaintext + len, &len) != 1)
-        goto out;  /* auth failure lands here */
-    ret = 0;
-out:
-    EVP_CIPHER_CTX_free(ctx);
-    return ret;
-}
-
-/*
- * AES-256-GCM wrap/unwrap for arbitrary-length data (used for FEK).
- */
-static int gcm_wrap(const uint8_t *key, const uint8_t *nonce,
-                    const uint8_t *pt, int pt_len,
-                    uint8_t *ct, uint8_t *tag)
-{
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    int len, ret = -1;
-
-    if (!ctx) return -1;
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            CRYPTOFS_NONCE_SIZE, NULL) != 1)
-        goto out;
-    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
-        goto out;
-    if (EVP_EncryptUpdate(ctx, ct, &len, pt, pt_len) != 1)
-        goto out;
-    if (EVP_EncryptFinal_ex(ctx, ct + len, &len) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
-                            CRYPTOFS_TAG_SIZE, tag) != 1)
-        goto out;
-    ret = 0;
-out:
-    EVP_CIPHER_CTX_free(ctx);
-    return ret;
-}
-
-static int gcm_unwrap(const uint8_t *key, const uint8_t *nonce,
-                      const uint8_t *ct, int ct_len,
-                      const uint8_t *tag, uint8_t *pt)
-{
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    int len, ret = -1;
-
-    if (!ctx) return -1;
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            CRYPTOFS_NONCE_SIZE, NULL) != 1)
-        goto out;
-    if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
-        goto out;
-    if (EVP_DecryptUpdate(ctx, pt, &len, ct, ct_len) != 1)
-        goto out;
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
-                            CRYPTOFS_TAG_SIZE, (void *)tag) != 1)
-        goto out;
-    if (EVP_DecryptFinal_ex(ctx, pt + len, &len) != 1)
-        goto out;
-    ret = 0;
-out:
-    EVP_CIPHER_CTX_free(ctx);
-    return ret;
-}
 
 /* ── helper: fill buffer with a pattern ──────────────────────────── */
 

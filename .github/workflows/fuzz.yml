@@ -1,0 +1,53 @@
+name: Fuzz (crypto path)
+
+# Scheduled + manual only: these harnesses need clang/libFuzzer and run for
+# minutes at a time, so they are kept off the PR path entirely (see
+# tests/fuzz/README.md and CRYPTFS-1).
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds_per_target:
+        description: 'Seconds to fuzz each target for'
+        required: false
+        default: '300'
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and libssl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libssl-dev
+
+      - name: Build fuzz harnesses
+        run: make fuzz-build
+
+      - name: Replay checked-in corpus (regression gate)
+        run: make fuzz-replay
+
+      - name: Fuzz fuzz_extent_crypto
+        working-directory: tests/fuzz
+        run: |
+          ./fuzz_extent_crypto -max_total_time="${{ github.event.inputs.seconds_per_target || 300 }}" corpus/fuzz_extent_crypto/
+
+      - name: Fuzz fuzz_parse_file
+        working-directory: tests/fuzz
+        run: |
+          ./fuzz_parse_file -max_total_time="${{ github.event.inputs.seconds_per_target || 300 }}" corpus/fuzz_parse_file/
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            tests/fuzz/crash-*
+            tests/fuzz/oom-*
+            tests/fuzz/timeout-*
+            tests/fuzz/leak-*
+          if-no-files-found: ignore

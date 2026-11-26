@@ -5,7 +5,7 @@ FROM alpine:3.20 AS builder
 RUN apk add --no-cache gcc musl-dev openssl-dev make
 
 WORKDIR /build
-COPY crypto_verify.c Makefile ./
+COPY crypto_verify.c cryptofs_crypto.h Makefile ./
 RUN make
 
 FROM alpine:3.20
